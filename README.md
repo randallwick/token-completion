@@ -29,7 +29,7 @@ Complete `print -r -- $DEMO_REG` again and pick `[.env]`. The editable result is
 
 ## Installation and updates
 
-Source installations need zsh, fzf with NUL input/output and border-label support, and Python 3.10+ with its standard library. Git is used for installation and for explicitly installing or updating GitHub providers. The Nix package supplies its runtime tools.
+Source installations need zsh, fzf with NUL input/output support, and Python 3.10+ with its standard library. Git is used for installation and for explicitly installing or updating GitHub providers. The Nix package supplies its runtime tools.
 
 Use `stable` for released changes or `development` for ongoing development. Version tags such as `v0.1.0` select a fixed release. After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
 
@@ -101,6 +101,7 @@ Set shell variables before sourcing the plugin in `.zshrc`. The provider array i
 | `TOKEN_COMPLETION_PROVIDERS` | Ordered array of provider IDs, absolute local provider files or GitHub references | Shell, dotenv and compatible providers defined in the shell. An explicitly empty array disables all providers. |
 | `TOKEN_COMPLETION_CONFIG_DIR` | Directory containing `providers.lock` | `${XDG_CONFIG_HOME:-$HOME/.config}/token-completion` |
 | `XDG_CACHE_HOME` | Base directory for downloaded provider checkouts | `$HOME/.cache`; the plugin uses the `token-completion` subdirectory |
+| `TOKEN_COMPLETION_PROMPT` | Literal picker prompt, read each time the picker opens. Set to an empty string to hide it. | `› ` (chevron and space) |
 | `NO_COLOR` | Set to a nonempty string to disable decorative color | Use the terminal theme with an accent on the prompt and selection. Piped CLI output is plain. |
 
 **Use just the project-local source.** Put `TOKEN_COMPLETION_PROVIDERS=(dotenv)` before loading the plugin. An installed plugin that exports a compatible named provider can join the array by ID, in either load order. Its own settings and data remain with that plugin.

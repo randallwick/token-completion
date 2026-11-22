@@ -94,6 +94,7 @@ zle -N fallback
 bindkey '^I' fallback
 LAB_ENV='secret shell value'
 SOLO_SHELL='value with spaces'
+TOKEN_COMPLETION_PROMPT='Look up › '
 TOKEN_COMPLETION_PROVIDERS=(shell dotenv "$HOME/catalog.zsh")
 """ + SOURCE + """
 HISTFILE=$HOME/history
@@ -187,6 +188,21 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         (self.one/".env").unlink()
         self.assertIn(".env lookup", self.zsh(SOURCE+"\ntoken-completion dotenv FIELD").stderr)
 
+    def test_picker_options(self):
+        capture = self.home / "capture-fzf"
+        capture.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+        capture.chmod(0o755)
+        for value in (None, "", "Filter $tokens > "):
+            with self.subTest(value=value):
+                setting = ("unset TOKEN_COMPLETION_PROMPT" if value is None
+                           else "TOKEN_COMPLETION_PROMPT=" + shlex.quote(value))
+                run = self.zsh(SOURCE + "\n" + setting + '\n_tc_fzf="$HOME/capture-fzf"\n_tc_pick')
+                self.assertEqual(run.returncode, 0, run.stderr)
+                args = run.stdout.splitlines()
+                self.assertIn("--prompt=" + ("› " if value is None else value), args)
+                self.assertIn("--no-border", args)
+                self.assertFalse(any(arg.startswith("--border-label") for arg in args))
+
     def test_zle(self):
         term = Terminal(self.home, self.config, self.env, self.one)
         self.addCleanup(term.close)
@@ -203,7 +219,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.send(b'!')
         self.assertEqual(term.probe(), 'print --flag="$SOLO_SHELL"! tail')
         term.send(b'\x05\x15printf $LAB_EN\t')
-        screen = term.until(b'token ')
+        screen = term.until(b'Look up ')
         screen += term.until(b'Enter  insert')
         if b'[catalog]' not in screen:
             screen += term.until(b'[catalog]')
@@ -212,7 +228,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.until(b"\x1b[?1049l")
         self.assertEqual(term.probe(), "printf $LAB_EN")
         term.send(b'\t')
-        term.until(b'token ')
+        term.until(b'Look up ')
         term.send(b'.env')
         term.until(b'1/')
         term.send(b'\r')
@@ -227,7 +243,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.until(b'secret two')
         term.until(b'READY>')
         term.send(b'print $TWINS\t')
-        term.until(b'token ')
+        term.until(b'Look up ')
         term.send(b'\x1b[B\r')
         term.until(b"\x1b[?1049l")
         self.assertEqual(term.probe(), 'print second')

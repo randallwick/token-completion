@@ -250,7 +250,8 @@ _tc_fragment() {
 
 _tc_pick() {
   emulate -L zsh
-  local -a _tc_style=(--ansi --color=pointer:cyan,prompt:cyan,label:cyan,hl:yellow,hl+:yellow)
+  local _tc_default_prompt='› '
+  local -a _tc_style=(--ansi --color=pointer:cyan,prompt:cyan,hl:yellow,hl+:yellow)
   local _tc_dim=$'\e[2m' _tc_reset=$'\e[0m'
   if [[ -n ${NO_COLOR:-} || ${TERM:-dumb} == dumb ]]; then
     _tc_style=(--color=bw)
@@ -271,8 +272,8 @@ _tc_pick() {
   done
   # Do not inherit user accept/execute/preview bindings in an insertion widget.
   printf '%s\0' "${_tc_lines[@]}" | FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' command "$_tc_fzf" \
-    --read0 --print0 --delimiter=$'\t' --with-nth=2.. --no-multi --layout=reverse --border=rounded \
-    --border-label=' Tokens ' --prompt='token › ' --pointer='▸' \
+    --read0 --print0 --delimiter=$'\t' --with-nth=2.. --no-multi --layout=reverse --no-border \
+    --prompt="${TOKEN_COMPLETION_PROMPT-$_tc_default_prompt}" --pointer='▸' \
     --header='Enter  insert     Esc  cancel' "${_tc_style[@]}"
 }
 
