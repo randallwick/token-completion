@@ -29,13 +29,15 @@ Complete `print -r -- $DEMO_REG` again and pick `[.env]`. The editable result is
 
 ## Dependencies
 
-For a source installation, put the commands you need on `PATH`. The Nix package supplies the helper executables. The table gives the lowest versions verified on Linux for each role.
+For a source installation, put the commands you need on `PATH`. The Nix package supplies the helper executables. The table lists versions verified on Linux. Optional parser entries report tested versions; earlier compatible releases may work. The Nix package includes PyYAML and supplies tomli when its Python needs it.
 
 | Dependency | Minimum verified version | When you need it |
 | --- | --- | --- |
 | zsh | 5.9 | The Tab widget runs in interactive zsh with ZLE enabled. |
 | fzf | 0.52.1 | Filters NUL-delimited candidates and displays the picker when several match. |
-| Python 3 | 3.10.15 (3.10 series) | Reads dotenv keys and values, manages provider pins, and verifies cached GitHub providers. The standard library is sufficient. |
+| Python 3 | 3.10.15 (3.10 series) | Reads dotenv, INI and JSON files, manages provider pins and verifies local snapshots. Python 3.11+ also reads TOML using its standard-library `tomllib`. |
+| PyYAML (optional) | 6.0.1 tested on Python 3.11.9; 6.0.3 tested on Python 3.10.15 | Reads YAML documents with its safe loader. For a source install, use `python3 -m pip install PyYAML` in the interpreter environment on `PATH`. |
+| tomli (optional) | 2.4.0 tested on Python 3.10.15 | Reads TOML on Python 3.10. Use `python3 -m pip install tomli` there. Python 3.11+ supplies its own TOML reader. |
 | Git | 2.44.1 | Clones a source installation and fetches GitHub providers during explicit install or update. Completion from a verified cache works offline. |
 | Python 3 for tests | 3.11.9 (3.11 series) | The terminal tests use `termios.tcsetwinsize` to size a disposable PTY. |
 
@@ -108,7 +110,11 @@ Set shell variables before sourcing the plugin in `.zshrc`. The provider array i
 
 | Setting | Accepted value | Default |
 | --- | --- | --- |
-| `TOKEN_COMPLETION_PROVIDERS` | Ordered array of provider IDs, absolute local provider files or GitHub references | Shell, dotenv and compatible providers defined in the shell. An explicitly empty array disables all providers. |
+| `TOKEN_COMPLETION_PROVIDERS` | Ordered array of provider IDs, absolute local provider files or GitHub references | The six built-ins (`shell`, `dotenv`, `ini`, `toml`, `json`, `yaml`) and compatible providers defined in the shell. An explicitly empty array disables all providers. |
+| `TOKEN_COMPLETION_INI_FILES` | Ordered zsh array of INI document paths | Empty. Add paths to offer their leaf values through the `ini` provider. |
+| `TOKEN_COMPLETION_TOML_FILES` | Ordered zsh array of TOML document paths | Empty. Add paths to offer their leaf values through the `toml` provider. |
+| `TOKEN_COMPLETION_JSON_FILES` | Ordered zsh array of JSON document paths | Empty. Add paths to offer their leaf values through the `json` provider. |
+| `TOKEN_COMPLETION_YAML_FILES` | Ordered zsh array of YAML document paths | Empty. Add paths to offer their leaf values through the `yaml` provider. |
 | `TOKEN_COMPLETION_CONFIG_DIR` | Directory containing `providers.lock` | `${XDG_CONFIG_HOME:-$HOME/.config}/token-completion` |
 | `XDG_CACHE_HOME` | Base directory for downloaded provider checkouts | `$HOME/.cache`; the plugin uses the `token-completion` subdirectory |
 | `TOKEN_COMPLETION_PROMPT` | Literal picker prompt, read each time the picker opens. Set to an empty string to hide it. | `› ` (chevron and space) |
@@ -138,25 +144,61 @@ Run `token-completion providers install` after loading the plugin. To advance th
 | `token-completion providers list` | Show configured providers, status and pinned GitHub revisions. |
 | `token-completion providers install` | Resolve new entries, reuse existing pins and restore missing cached sources. |
 | `token-completion providers update` | Resolve configured refs again and report old and new pins. |
+| `token-completion files --FORMAT FILE ...` | Register source paths in this shell. Repeat `--ini`, `--toml`, `--json` or `--yaml` for additional files. |
+| `token-completion lookup FORMAT SELECT FILE PATH [GUARD CMD OPTION]` | Resolve an exact document path at execution time. An optional provider guard must approve the source before the lookup. |
 | `token-completion dotenv KEY` | Print the current directory's literal value with no trailing newline. A missing key/file produces a diagnostic and a nonzero exit. An explicitly empty value succeeds quietly. |
 
 ### Dotenv grammar
 
 The built-in dotenv provider reads `.env` on completion and again when an inserted lookup executes. It accepts single-line UTF-8 assignments, optional `export`, optional spaces around `=`, and single- or double-quoted literal values. A trailing comment follows a quoted value or starts with whitespace and `#` in an unquoted value. Dollar signs and backslashes are literal. Malformed lines are skipped, and the last assignment to a key wins. A missing lookup inside ordinary quoted command substitution still passes one empty argument to the surrounding command.
 
+## Complete a path inside a document
+
+The INI, TOML, JSON and YAML providers work directly in token-completion.
+Each starts with an empty file list. In a scratch directory, try a JSON source:
+
+```zsh
+print -r -- '{"deployment":{"region":"eu-west-1"}}' > settings.json
+token-completion files --json ./settings.json
+```
+
+Type `print -r -- $depl.reg` and press Tab. A unique prefix resolves each level:
+the editable line now contains a quoted `token-completion lookup` for
+`deployment.region`. Press Enter to print `eu-west-1`. Replaying that line in
+another directory reads **that directory’s** `settings.json`. Paths beginning with
+`~` expand at lookup; use an absolute path for a fixed location.
+
+Add more documents with `token-completion files --ini FILE --json FILE ...`.
+To keep the selection across shells, set the corresponding arrays in your zsh
+configuration, for example:
+
+```zsh
+TOKEN_COMPLETION_JSON_FILES=(./settings.json ./config/overrides.json)
+TOKEN_COMPLETION_TOML_FILES=(./pyproject.toml)
+```
+
+If you explicitly select providers, include each format you want, e.g.
+`TOKEN_COMPLETION_PROVIDERS=(shell json toml)`. These file providers use
+`leaf-values`. They read their documents when queried and show key paths with
+source labels. Scalar contents appear only when the inserted lookup executes.
+
+A dot separates levels and zero-based indices select array elements. A literal
+dot inside a key is encoded as `%2E`; spaces appear as `%20`. On a branch
+with several matching children the picker offers those children; choosing a
+container refines the token for another Tab. Exact lookups preserve key case.
+Missing keys and unreadable files produce a diagnostic and an empty argument
+in the generated lookup. Present empty strings resolve quietly.
+
 ## Complete tokens for a command option
 
-A provider can scope `$` completion to one command and option. For example,
-[shell-overrides](https://github.com/randallwick/shell-overrides) can declare
-an INI section-name source in an `aws` manifest rule. With that rule active,
-`aws s3 ls --profile=$wo<Tab>` offers matching profile names. Selecting a name
-inserts a quoted lookup into the command. The source file, format, selection
-policy and command scope belong in the manifest.
-
-Scoped providers can also walk dotted document paths. A branch selection
-keeps a token in the buffer for another Tab; a leaf selection inserts the
-provider’s final expression. Ordinary paths such as `cd /h/r/p<Tab>` go to
-the existing zsh completion widget. [Contextual provider interface](docs/providers.md#command-and-option-context)
+A provider may select a different policy for a particular command or option.
+For example, shell-overrides can declare an INI credentials file as a
+`section-names` source for one command’s `--profile` option. At that option,
+completion shows only matching section names and the final lookup returns
+the name itself. Credential option names and values stay out of the picker.
+The optional plugin owns its manifest and checks whether the declaration is
+still active on replay. Token-completion owns the parsers, navigation,
+display and lookup. [Contextual provider interface](docs/providers.md#command-and-option-context)
 
 ## Write a provider
 
@@ -190,4 +232,4 @@ Keep provider files declarative at source time: installation may source them in 
 
 ## Development
 
-From the checkout, run `python3 -m unittest discover -s tests -v` with zsh, Git, fzf and Python 3.11+ on `PATH`. Tests create disposable shell configurations, terminal sessions, provider repositories and caches. For interactive edits, start `zsh -f` in the checkout and source `./token-completion.plugin.zsh`; open a fresh disposable shell to pick up code changes.
+From the checkout, run `python3 -m unittest discover -s tests -v` with zsh, Git, fzf and Python 3.11+ with PyYAML on `PATH`. Tests create disposable shell configurations, terminal sessions, provider repositories and caches. For interactive edits, start `zsh -f` in the checkout and source `./token-completion.plugin.zsh`; open a fresh disposable shell to pick up code changes.

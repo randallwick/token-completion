@@ -40,6 +40,85 @@ token_provider_dotenv_query() {
   done < <(command "$_tc_python" "$_tc_root/dotenv.py" keys)
 }
 
+# Document providers share file parsing, path traversal and deferred insertion.
+# A scoped provider may call this same API with an execution-time policy guard.
+token_completion_file() {
+  emulate -L zsh
+  (( $# == 4 || $# == 7 )) || return 2
+  local _tc_fragment_text=$1 _tc_format=$2 _tc_selection=$3 _tc_file=$4
+  shift 4
+  local _tc_kind _tc_display _tc_node _tc_insertion
+  local -a _tc_lookup
+  while IFS= read -r -d '' _tc_kind && IFS= read -r -d '' _tc_display && IFS= read -r -d '' _tc_node; do
+    if [[ $_tc_kind == branch ]]; then
+      _tc_insertion='$'${_tc_node}
+    else
+      _tc_lookup=("$_tc_format" "$_tc_selection" "$_tc_file" "$_tc_node" "$@")
+      # The sentinel preserves trailing newlines through command substitution.
+      _tc_insertion='"${$(token-completion lookup '"${(j: :)${(@q)_tc_lookup}}"' && builtin print -rn -- .)%.}"'
+    fi
+    token_completion_offer "$_tc_display" "$_tc_file" "$_tc_insertion"
+  done < <(command "$_tc_python" "$_tc_root/file_source.py" list "$_tc_format" "$_tc_selection" "$_tc_file" "$_tc_fragment_text")
+}
+
+_tc_document_query() {
+  emulate -L zsh
+  local _tc_format=$1 _tc_fragment_text=$2 _tc_file
+  shift 2
+  local -aU _tc_documents=("$@")
+  for _tc_file in "${_tc_documents[@]}"; do
+    token_completion_file "$_tc_fragment_text" "$_tc_format" leaf-values "$_tc_file"
+  done
+}
+
+typeset -g token_provider_ini_version=1 token_provider_toml_version=1
+typeset -g token_provider_json_version=1 token_provider_yaml_version=1
+token_provider_ini_query() { _tc_document_query ini "$1" "${TOKEN_COMPLETION_INI_FILES[@]}"; }
+token_provider_toml_query() { _tc_document_query toml "$1" "${TOKEN_COMPLETION_TOML_FILES[@]}"; }
+token_provider_json_query() { _tc_document_query json "$1" "${TOKEN_COMPLETION_JSON_FILES[@]}"; }
+token_provider_yaml_query() { _tc_document_query yaml "$1" "${TOKEN_COMPLETION_YAML_FILES[@]}"; }
+
+_tc_document_lookup() {
+  emulate -L zsh
+  setopt extendedglob
+  if (( $# == 7 )); then
+    if [[ $5 != [a-zA-Z_][a-zA-Z0-9_-]# ]] || (( ! ${+functions[$5]} )) ||
+        ! "$5" "$6" "$7" "$1" "$2" "$3" > /dev/null; then
+      print -ru2 -- 'token-completion: lookup is no longer authorized by its provider'
+      return 1
+    fi
+  elif (( $# != 4 )); then
+    print -ru2 -- 'usage: token-completion lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION]'
+    return 2
+  fi
+  command "$_tc_python" "$_tc_root/file_source.py" get "$1" "$2" "$3" "$4"
+}
+
+_tc_add_files() {
+  emulate -L zsh
+  local -a _tc_ini _tc_toml _tc_json _tc_yaml
+  if (( ! $# || $# % 2 )); then
+    print -ru2 -- 'usage: token-completion files --ini|--toml|--json|--yaml FILE ...'
+    return 2
+  fi
+  while (( $# )); do
+    [[ -n $2 ]] || { print -ru2 -- 'token-completion: expected a nonempty file path'; return 2; }
+    case $1 in
+      --ini) _tc_ini+=("$2") ;;
+      --toml) _tc_toml+=("$2") ;;
+      --json) _tc_json+=("$2") ;;
+      --yaml) _tc_yaml+=("$2") ;;
+      *) print -ru2 -- "token-completion: unknown file option ${(q)1}"; return 2 ;;
+    esac
+    shift 2
+  done
+  (( $#_tc_ini )) && TOKEN_COMPLETION_INI_FILES+=("${_tc_ini[@]}")
+  (( $#_tc_toml )) && TOKEN_COMPLETION_TOML_FILES+=("${_tc_toml[@]}")
+  (( $#_tc_json )) && TOKEN_COMPLETION_JSON_FILES+=("${_tc_json[@]}")
+  (( $#_tc_yaml )) && TOKEN_COMPLETION_YAML_FILES+=("${_tc_yaml[@]}")
+  return 0
+}
+
 _tc_valid_provider() {
   emulate -L zsh
   setopt extendedglob
@@ -188,6 +267,9 @@ _tc_help() {
   print -r -- '  providers list       Show configured sources and their pins'
   print -r -- '  providers install    Materialize missing providers at locked revisions'
   print -r -- '  providers update     Resolve refs and publish their new pins'
+  print -r -- '  files --FORMAT FILE  Add document sources for this shell (repeatable)'
+  print -r -- '  lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION]'
+  print -r -- '                       Read one document key or leaf at execution time'
   print -r -- '  dotenv KEY           Read a literal from .env in this directory'
 }
 
@@ -195,6 +277,8 @@ token-completion() {
   emulate -L zsh
   case "$1:$2:$#" in
     ::0|help::1|--help::1|-h::1) _tc_help ;;
+    files:*) shift; _tc_add_files "$@" ;;
+    lookup:*) shift; _tc_document_lookup "$@" ;;
     dotenv:*:2) command "$_tc_python" "$_tc_root/dotenv.py" get "$2" ;;
     providers:(list|install|update):2)
       local -a _tc_entries _tc_ids
@@ -317,6 +401,7 @@ token_completion_offer() {
 
 _tc_complete() {
   emulate -L zsh
+  setopt extendedglob
   local -a _tc_parameter_names=("${(@k)parameters}")
   local _tc_query _tc_id _tc_row _tc_filter_result
   local -i _tc_scoped=0
@@ -330,9 +415,13 @@ _tc_complete() {
         "$_tc_hook" "$_tc_query" "$_tc_command" "$_tc_option" "$_tc_form" "${_tc_args[@]}" >/dev/null
       fi
     done
-    if (( ! _tc_scoped )) && [[ $_tc_query =~ '^[A-Za-z_][A-Za-z_0-9]*$' ]]; then
+    if (( ! _tc_scoped )); then
       for _tc_id in "${_tc_ids[@]}"; do
-        "token_provider_${_tc_id}_query" "$_tc_query" >/dev/null
+        # File providers accept an empty root or a dotted document path.
+        # Third-party v1 query functions keep their flat identifier contract.
+        if [[ $_tc_id == (ini|toml|json|yaml) || $_tc_query == [A-Za-z_][A-Za-z_0-9]# ]]; then
+          "token_provider_${_tc_id}_query" "$_tc_query" >/dev/null
+        fi
       done
     fi
     if (( $#_tc_rows )); then

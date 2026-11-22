@@ -131,7 +131,7 @@ _tc_active_providers
 print -r -- "empty:$#_tc_ids"
 """)
                 self.assertEqual(check.returncode, 0, check.stderr)
-                self.assertIn("shell dotenv catalog", check.stdout)
+                self.assertTrue({"shell", "dotenv", "catalog"} <= set(check.stdout.splitlines()[0].split()))
                 self.assertIn("2\tTWINS\t[same]", check.stdout)
                 self.assertIn("3\tTWINS\t[same]", check.stdout)
                 self.assertIn("empty:0", check.stdout)
@@ -187,6 +187,69 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         self.assertIn("ABSENT", check.stderr)
         (self.one/".env").unlink()
         self.assertIn(".env lookup", self.zsh(SOURCE+"\ntoken-completion dotenv FIELD").stderr)
+
+    def test_standalone_file_providers_list_and_registration(self):
+        check = self.zsh(SOURCE + """
+token-completion providers list || exit 1
+token-completion files --ini './local prefs.ini' --toml ./services.toml --json ./app.json --yaml ./deploy.yml --json ./extra.json || exit 2
+for var in TOKEN_COMPLETION_INI_FILES TOKEN_COMPLETION_TOML_FILES TOKEN_COMPLETION_JSON_FILES TOKEN_COMPLETION_YAML_FILES; do
+  print -rl -- "${(@P)var}"
+done
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        for fmt in ("ini", "toml", "json", "yaml"):
+            self.assertRegex(check.stdout, rf"(?m)^{fmt}\s+loaded")
+        for file in ("./local prefs.ini", "./services.toml", "./app.json", "./deploy.yml", "./extra.json"):
+            self.assertIn(file, check.stdout.splitlines())
+
+    def test_each_builtin_document_provider_emits_from_its_file_array(self):
+        documents = {
+            "ini": "[deployment]\nzone=DO_NOT_DISPLAY\n",
+            "toml": '[deployment]\nzone="DO_NOT_DISPLAY"\n',
+            "json": '{"deployment":{"zone":"DO_NOT_DISPLAY"}}',
+            "yaml": "deployment: {zone: DO_NOT_DISPLAY}\n",
+        }
+        for fmt, doc in documents.items():
+            with self.subTest(format=fmt):
+                (self.one/"document").write_text(doc)
+                result = self.zsh(SOURCE + f"""
+TOKEN_COMPLETION_{fmt.upper()}_FILES=(./document)
+token_completion_offer() {{ printf '%s\\0' "$@"; }}
+token_provider_{fmt}_query depl.z
+""")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                display, label, insertion, end = result.stdout.split("\0")
+                self.assertEqual((display, label, end), ("deployment.zone", "./document", ""))
+                self.assertIn("token-completion lookup", insertion)
+                self.assertNotIn("DO_NOT_DISPLAY", result.stdout)
+
+    def test_standalone_document_paths_in_zle(self):
+        import json
+        for directory, zone in ((self.one, "east coast"), (self.two, "north zone")):
+            (directory/"settings.json").write_text(json.dumps({"deployment": {"us.east": zone}}))
+        # Select the built-in JSON provider alone in a disposable shell.
+        config = self.config.replace('TOKEN_COMPLETION_PROVIDERS=(shell dotenv "$HOME/catalog.zsh")',
+                                     'TOKEN_COMPLETION_PROVIDERS=(json)')
+        config += '\ntoken-completion files --json ./settings.json\n'
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b'print -r -- $dep\t')
+        self.assertEqual(term.probe(), "print -r -- $deployment.")
+        term.send(b'us\t')
+        saved = term.probe()
+        self.assertIn("token-completion lookup", saved)
+        self.assertIn("deployment.us%2Eeast", saved)
+        self.assertNotIn("east coast", saved)
+        self.assertNotIn("shell-overrides", saved)
+        term.send(b'\r')
+        term.until(b'east coast')
+        term.until(b'READY>')
+        self.assertIn(saved, (self.home/"history").read_text())
+        term.send(f'cd ../two; {saved}\r'.encode())
+        term.until(b'north zone')
+        term.until(b'READY>')
+        term.send(b'print -r -- $depl.us\t')
+        self.assertEqual(term.probe(), saved)
 
     def test_scoped_context_in_zle(self):
         # A provider supplies a branch insertion on one Tab, a leaf on the next.

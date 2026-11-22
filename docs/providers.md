@@ -1,7 +1,7 @@
 # Provider sources and pins
 
 Put `TOKEN_COMPLETION_PROVIDERS` in your zsh configuration **before** sourcing
-the plugin. This example selects both built-ins, an optional provider from
+the plugin. This example selects two built-ins, an optional provider from
 another loaded plugin, one file you edit locally and one provider tracked from
 GitHub. Replace the example path and repository with your own.
 
@@ -17,7 +17,8 @@ typeset -ga TOKEN_COMPLETION_PROVIDERS=(
 
 | Entry | How it becomes available |
 | --- | --- |
-| `shell`, `dotenv` | Built into the completion plugin. |
+| `shell`, `dotenv` | Built-in shell parameter and dotenv key providers. |
+| `ini`, `toml`, `json`, `yaml` | Built-in document providers. Configure their file arrays or run `token-completion files`. |
 | `team_tokens` | A loaded zsh function implements the named provider ABI. Either plugin may load first. |
 | Absolute file path | The plugin sources your local file. Use this form during provider development. |
 | `github:OWNER/REPO@REF:FILE` | The manager locks a commit and materializes its verified files under your XDG cache. |
@@ -128,8 +129,49 @@ quoted deferred lookup. All insertions leave the line editable. With no
 candidates the widget delegates to the existing Tab binding. Returning from
 the hook without claiming scope leaves ordinary providers available.
 
-The context hook is additive. Existing `token_provider_<id>_query` functions
-continue to receive flat shell identifiers and use `token_completion_emit`.
-To exercise the cross-plugin PTY test, set `SHELL_OVERRIDES_TEST_PLUGIN` to
-the absolute path of the shell-overrides plugin entry point before running
-the suite, and select a PyYAML-capable `SHELL_OVERRIDES_PYTHON`.
+### Delegate to a document provider
+
+A contextual hook can use the same document reader as the standalone INI,
+TOML, JSON and YAML providers. Call:
+
+```zsh
+token_completion_file "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION]
+```
+
+The first four arguments are the typed fragment without `$`, format name,
+selection policy and source file. The final three arguments are optional as a
+group. The helper emits matching rows through `token_completion_offer`. It does
+not claim the command scope. A hook that needs exclusive candidates calls
+`token_completion_scope` itself first.
+
+| Selection | Result |
+| --- | --- |
+| `leaf-values` | Navigate maps and arrays one level at a time. A leaf lookup returns the scalar value. This is the policy used by the four built-in document providers. |
+| `keys` | Offer existing top-level map keys. A lookup returns the selected key name. |
+| `section-names` | INI only. Offer literal section names. A lookup can return the section name but cannot descend into a section. |
+
+INI option names preserve case; interpolation is disabled. JSON and YAML use
+their parsers’ supported encodings, INI accepts UTF-8 with an optional BOM,
+and TOML uses UTF-8. Supported map keys are nonempty strings without NUL.
+Strings retain whitespace at execution, including trailing newlines. Boolean
+and null leaves use JSON spellings; date and time values use ISO format.
+Lookups diagnose unsupported scalars or missing paths without printing source
+values. Provider code can reuse this helper with explicitly configured files
+even if that format's standalone file array is empty.
+
+For rules that can change, pass a zsh function name as `GUARD` and include
+the command and option. The generated expression invokes:
+
+```text
+token-completion lookup FORMAT SELECT FILE PATH GUARD CMD OPTION
+```
+
+At execution, `GUARD CMD OPTION FORMAT SELECT FILE` must succeed before the
+plugin opens the file. A removed guard or rejected declaration fails the lookup.
+This lets a manifest provider keep ownership of its live declarations while the
+completion plugin owns parsing, component matching, display and replay.
+
+The context hook is additive. Existing version-1 providers can keep emitting
+flat candidates through `token_completion_emit`. To exercise the cross-plugin
+PTY test, set `SHELL_OVERRIDES_TEST_PLUGIN` to the external plugin's absolute
+entry point and put a PyYAML-capable Python on `PATH`.
