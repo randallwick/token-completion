@@ -9,6 +9,31 @@ token_completion_filter() {
   FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' command "$_tc_fzf" --read0 --print0 --ignore-case --filter "$@"
 }
 
+# Emit ranked immediate child directory names as NUL-delimited records.
+token_completion_directory_matches() {
+  emulate -L zsh
+  (( $# == 2 )) || return 2
+  local fragment=$1 root=$2
+  [[ -n $root && -d $root ]] || return 1
+  local -a directories=("$root"/*(N-/:t))
+  if (( ${directories[(Ie)$fragment]} )); then
+    printf '%s\0' "$fragment"
+    return
+  fi
+  (( $#directories )) || return 1
+  printf '%s\0' "${directories[@]}" | token_completion_filter "$fragment"
+}
+
+# The provider owns the command/argument scope and supplies the resolved root.
+token_completion_directory() {
+  emulate -L zsh
+  (( $# == 2 && ${+_tc_context_rows} )) || return 1
+  local basename
+  while IFS= read -r -d '' basename; do
+    token_completion_offer "${(V)basename}" "$2" "${(q)basename}"
+  done < <(token_completion_directory_matches "$1" "$2")
+}
+
 token_completion_emit() {
   emulate -L zsh
   setopt extendedglob

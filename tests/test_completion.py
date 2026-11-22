@@ -520,6 +520,58 @@ token_provider_catalog_argument_context() {
             self.assertEqual(term.probe(), "print " + insertion)
             term.send(b"\x15")
 
+    def test_live_directory_matches(self):
+        root = self.one / "project root"
+        root.mkdir()
+        names = ["nix", "nix-config", "Space & $(literal)", "tab\tline\n", "-dash"]
+        for name in [*names, ".hidden"]:
+            (root / name).mkdir()
+        (root / "alias").symlink_to(root / "nix", target_is_directory=True)
+        (root / "dangling").symlink_to(root / "gone", target_is_directory=True)
+        (root / "file").touch()
+        (root / "nix/nested").mkdir()
+
+        def matches(fragment):
+            run = subprocess.run(
+                ["zsh", "-fc", SOURCE + '\ntoken_completion_directory_matches "$1" "$2"',
+                 "zsh", fragment, str(root)], env=self.env, capture_output=True,
+            )
+            if run.stdout:
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertTrue(run.stdout.endswith(b"\0"))
+                return run.stdout[:-1].decode().split("\0")
+            return []
+
+        self.assertCountEqual(matches(""), [*names, "alias"])
+        self.assertEqual(matches("nix"), ["nix"])
+        self.assertEqual(matches("NXCF"), ["nix-config"])
+        self.assertEqual(matches("tab\tline\n"), ["tab\tline\n"])
+        (root / "nix-config").rename(root / "renamed")
+        self.assertEqual(matches("nxcf"), [])
+        self.assertEqual(matches("RNMD"), ["renamed"])
+
+    def test_directory_argument_in_zle(self):
+        name = "sp ace;$(touch injected)"
+        (self.one / name).mkdir()
+        config = self.config + """
+project() { printf '%s' "$1" > "$HOME/selected"; }
+token_provider_catalog_argument_context() {
+  [[ $1 == literal && $3 == project && $5 == positional && $# == 5 ]] || return 0
+  token_completion_scope
+  token_completion_directory "$2" "$PWD"
+}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b"project SPAC\t")
+        self.assertIn("sp", term.probe())
+        term.send(b"\r")
+        term.until(b"READY>")
+        self.assertEqual((self.home / "selected").read_text(), name)
+        self.assertFalse((self.one / "injected").exists())
+        term.send(b"print SPAC\t")
+        self.assertEqual(term.probe(), "print SPAC:fallback")
+
     def test_native_directory_components(self):
         (self.one / "home/randall/projects").mkdir(parents=True)
         config = self.config.replace("bindkey '^I' fallback", "autoload -Uz compinit; compinit -D")

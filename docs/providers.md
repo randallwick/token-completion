@@ -132,6 +132,28 @@ a flag that consumes a value from a standalone switch. Unmarked text never trigg
 widget saves the original argument span so insertion preserves an adjacent
 `--option=` and text after the cursor.
 
+For a command that takes one project directory name, register an argument
+context hook in your provider. This example accepts a bare name in the
+first argument and opens the picker on an empty argument:
+
+```zsh
+token_provider_projects_argument_context() {
+  [[ $1 == literal && $3 == project && $5 == positional && $# == 5 ]] || return 0
+  token_completion_scope
+  token_completion_directory "$2" "${PROJECT_ROOT:-$HOME/projects}"
+}
+```
+
+`token_completion_directory FRAGMENT ROOT` reads the immediate visible
+directories under the supplied root on every request. Symlinks to directories
+participate. An exact, case-sensitive basename wins, otherwise matching uses
+the same ranked, case-insensitive fuzzy filter as shell variables. The picker
+inserts the basename as one quoted shell argument and escapes control
+characters for display. The caller supplies the resolved root and owns the
+position and empty-fragment policy. Use
+`token_completion_directory_matches FRAGMENT ROOT` to read the same ordered
+basenames as NUL-delimited records from another shell function.
+
 Providers using the earlier option-only interface can keep
 `token_provider_<id>_context FRAGMENT COMMAND OPTION FORM [ARG ...]`.
 The widget uses it when the provider has no argument-context hook, at `--option=$fragment` and
