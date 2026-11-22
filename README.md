@@ -27,9 +27,19 @@ print -r -- 'DEMO_REGION="South Pacific"' > .env
 
 Complete `print -r -- $DEMO_REG` again and pick `[.env]`. The editable result is `print -r -- "$(token-completion dotenv DEMO_REGION)"`. A history replay reads the `.env` file in the directory where the replay runs.
 
-## Installation and updates
+## Dependencies
 
-Source installations need zsh, fzf with NUL input/output support, and Python 3.10+ with its standard library. Git is used for installation and for explicitly installing or updating GitHub providers. The Nix package supplies its runtime tools.
+For a source installation, put the commands you need on `PATH`. The Nix package supplies the helper executables. The table gives the lowest versions verified on Linux for each role.
+
+| Dependency | Minimum verified version | When you need it |
+| --- | --- | --- |
+| zsh | 5.9 | The Tab widget runs in interactive zsh with ZLE enabled. |
+| fzf | 0.52.1 | Filters NUL-delimited candidates and displays the picker when several match. |
+| Python 3 | 3.10.15 (3.10 series) | Reads dotenv keys and values, manages provider pins, and verifies cached GitHub providers. The standard library is sufficient. |
+| Git | 2.44.1 | Clones a source installation and fetches GitHub providers during explicit install or update. Completion from a verified cache works offline. |
+| Python 3 for tests | 3.11.9 (3.11 series) | The terminal tests use `termios.tcsetwinsize` to size a disposable PTY. |
+
+## Installation and updates
 
 Use `stable` for released changes or `development` for ongoing development. Version tags such as `v0.1.0` select a fixed release. After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
 
