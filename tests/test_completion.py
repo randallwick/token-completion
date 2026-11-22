@@ -214,7 +214,7 @@ token_provider_catalog_context() {
             term.send(b"\x15")
         for prefix in ("deploy get -- --value=", "deploy get | echo --value=", "deploy other --value ",
                        "deploy get &! echo --value=", "deploy get &| echo --value=",
-                       "deploy {fd}>out get --value="):
+                       "deploy {fd}>out get --value=", "deploy get 2<<EOF --value="):
             term.send((prefix + "$region.").encode() + b"\t")
             self.assertEqual(term.probe(), prefix + "$region.:fallback")
             term.send(b"\x15")

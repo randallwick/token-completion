@@ -246,7 +246,7 @@ _tc_fragment() {
         # zsh tokenizes >! as >|, and &>> as >>&. A numeric descriptor
         # stays attached to the operator. Its following word is never argv.
         ([0-9]#('<'|'<<<'|'<>'|'<&'|'>'|'>|'|'>>'|'>>|'|'>&'|'&>'|'&>|'|'>>&'|'>>&|')) _tc_redirect=1 ;;
-        ('<<'|'<<-'|'for'|'case'|'[['|'((') return 1 ;;
+        ([0-9]#('<<'|'<<-')|'for'|'case'|'[['|'((') return 1 ;;
         (*) if (( _tc_expect_command )); then
               case $_tc_previous in
                 ([a-zA-Z_][a-zA-Z_0-9]#=*|command|exec|builtin|noglob|nocorrect|time|env|if|then|elif|else|while|until|do|'!') ;;
