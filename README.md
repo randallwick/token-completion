@@ -43,6 +43,12 @@ For a source installation, put the commands you need on `PATH`. The Nix package 
 
 ## Installation and updates
 
+A default clone follows `stable`, the latest tested release. Follow the
+`development` branch to try merged changes before release, or select an
+immutable version tag such as `v0.2.0` to stay on one release. A Nix input
+stays at its locked revision until you update it. Contributors target
+`development`. [Contribution and release guide](CONTRIBUTING.md)
+
 Use `stable` for released changes or `development` for ongoing development. Version tags such as `v0.1.0` select a fixed release. After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
 
 ### Manual
