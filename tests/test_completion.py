@@ -47,10 +47,19 @@ class Terminal:
             timeout = end - time.monotonic()
             if timeout <= 0 or not select.select([self.fd], [], [], timeout)[0]:
                 raise AssertionError(f"missing {needle!r} in {self.pending[-1200:]!r}")
-            self.pending += os.read(self.fd, 65536)
+            packet = os.read(self.fd, 65536)
+            # Inline fzf requests a cursor position before painting. This PTY
+            # models a prompt on row six, away from either screen edge.
+            for _ in range(packet.count(b"\x1b[6n")):
+                self.send(b"\x1b[6;20R")
+            self.pending += packet
         index = self.pending.index(needle) + len(needle)
         observed, self.pending = self.pending[:index], self.pending[index:]
         return observed
+
+    def picker_closed(self):
+        # Both supported fzf versions relinquish mouse reporting on close.
+        return self.until(b"\x1b[?1000l")
 
     def probe(self):
         path = self.home / "buffer"
@@ -131,7 +140,7 @@ _tc_active_providers
 print -r -- "empty:$#_tc_ids"
 """)
                 self.assertEqual(check.returncode, 0, check.stderr)
-                self.assertIn("shell dotenv catalog", check.stdout)
+                self.assertTrue({"shell", "dotenv", "catalog"} <= set(check.stdout.splitlines()[0].split()))
                 self.assertIn("2\tTWINS\t[same]", check.stdout)
                 self.assertIn("3\tTWINS\t[same]", check.stdout)
                 self.assertIn("empty:0", check.stdout)
@@ -188,6 +197,151 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         (self.one/".env").unlink()
         self.assertIn(".env lookup", self.zsh(SOURCE+"\ntoken-completion dotenv FIELD").stderr)
 
+    def test_standalone_file_providers_list_and_registration(self):
+        check = self.zsh(SOURCE + """
+token-completion providers list || exit 1
+token-completion files --ini './local prefs.ini' --toml ./services.toml --json ./app.json --yaml ./deploy.yml --json ./extra.json || exit 2
+for var in TOKEN_COMPLETION_INI_FILES TOKEN_COMPLETION_TOML_FILES TOKEN_COMPLETION_JSON_FILES TOKEN_COMPLETION_YAML_FILES; do
+  print -rl -- "${(@P)var}"
+done
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        for fmt in ("ini", "toml", "json", "yaml"):
+            self.assertRegex(check.stdout, rf"(?m)^{fmt}\s+loaded")
+        for file in ("./local prefs.ini", "./services.toml", "./app.json", "./deploy.yml", "./extra.json"):
+            self.assertIn(file, check.stdout.splitlines())
+
+    def test_register_files_detects_once_and_publishes_atomically(self):
+        (self.one / "settings.JSON").write_text('{"region": "source value"}')
+        (self.one / "mislabeled.toml").write_text('{"region": "override value"}')
+        wrapper = self.home / "parser"
+        wrapper.write_text('#!/bin/sh\n[ "$2" != detect ] || echo detect >> "$HOME/detections"\nexec python3 "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.zsh(SOURCE + """
+_tc_python=$HOME/parser
+TOKEN_COMPLETION_PROVIDERS=(json)
+token-completion files -f settings.JSON --format json --file mislabeled.toml || exit 11
+token-completion files --format toml -f something && exit 12
+token-completion files --json first.json -f missing.toml && exit 13
+token-completion files --json first.json --format && exit 14
+token-completion files --format json && exit 15
+token-completion files --file && exit 16
+token-completion files --json first.json --ini other.ini && exit 17
+token_completion_offer() { print -r -- "$3"; }
+token_provider_json_query reg
+token_provider_json_query reg
+print -rl -- CATALOG "${TOKEN_COMPLETION_JSON_FILES[@]}"
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split("CATALOG\n")[1].splitlines(), ["settings.JSON", "mislabeled.toml"])
+        self.assertIn("lookup json leaf-values mislabeled.toml", result.stdout)
+        self.assertEqual((self.home / "detections").read_text().splitlines(), ["detect", "detect"])
+        self.assertNotIn("source value", result.stdout + result.stderr)
+
+    def test_token_query_cannot_register_an_unimplemented_document_parser(self):
+        check = self.zsh(SOURCE + """
+typeset -g token_provider_xml_version=1 token_provider_xml_file_format=1
+token_provider_xml_query(){ return 0; }
+TOKEN_COMPLETION_PROVIDERS=(xml json)
+token-completion files --json keep.json || exit 2
+token-completion files --json first.json --format xml -f /dev/null && exit 3
+token-completion files --xml /dev/null && exit 4
+print -r -- "${TOKEN_COMPLETION_JSON_FILES[@]}"
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout, "keep.json\n")
+        self.assertIn("xml", check.stderr)
+
+    def test_manifest_inference_cache_and_recovery(self):
+        (self.one/"settings").write_text('[deploy]\nzone=123456789\n')
+        (self.two/"settings").write_text('{"deploy":{"zone":true}}')
+        (self.two/"one.json").symlink_to("settings")
+        (self.two/"two.yaml").symlink_to("settings")
+        wrapper = self.home / "parser"
+        wrapper.write_text('#!/bin/sh\n[ "$2" != detect ] || echo detect >> "$HOME/detections"\nexec python3 "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.zsh(SOURCE + """
+_tc_python=$HOME/parser
+TOKEN_COMPLETION_PROVIDERS=(json ini toml yaml)
+token_completion_offer() { print -r -- "$3"; }
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+print -r -- '{"deploy":{"zone":"west"}}' > settings
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+cd ../two
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./one.json
+token_completion_file dep.z auto leaf-values ./two.yaml
+TOKEN_COMPLETION_PROVIDERS=(yaml)
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep auto keys ./settings
+token-completion lookup json leaf-values ./settings deploy.zone && exit 18
+true
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("ambiguous"), 1, result.stderr)
+        self.assertIn("ini", result.stderr)
+        self.assertIn("toml", result.stderr)
+        self.assertNotIn("123456789", result.stderr)
+        self.assertEqual(result.stdout.count("lookup json leaf-values ./settings"), 3)
+        self.assertIn("lookup json leaf-values ./one.json", result.stdout)
+        self.assertIn("lookup yaml leaf-values ./two.yaml", result.stdout)
+        self.assertEqual(result.stdout.count("lookup yaml leaf-values ./settings"), 2)
+        self.assertIn("lookup yaml keys ./settings", result.stdout)
+        self.assertEqual(len((self.home/"detections").read_text().splitlines()), 8)
+        self.assertIn("disabled", result.stderr)
+
+    def test_each_builtin_document_provider_emits_from_its_file_array(self):
+        documents = {
+            "ini": "[deployment]\nzone=DO_NOT_DISPLAY\n",
+            "toml": '[deployment]\nzone="DO_NOT_DISPLAY"\n',
+            "json": '{"deployment":{"zone":"DO_NOT_DISPLAY"}}',
+            "yaml": "deployment: {zone: DO_NOT_DISPLAY}\n",
+        }
+        for fmt, doc in documents.items():
+            with self.subTest(format=fmt):
+                (self.one/"document").write_text(doc)
+                result = self.zsh(SOURCE + f"""
+TOKEN_COMPLETION_{fmt.upper()}_FILES=(./document)
+token_completion_offer() {{ printf '%s\\0' "$@"; }}
+token_provider_{fmt}_query depl.z
+""")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                display, label, insertion, end = result.stdout.split("\0")
+                self.assertEqual((display, label, end), ("deployment.zone", "./document", ""))
+                self.assertIn("token-completion lookup", insertion)
+                self.assertNotIn("DO_NOT_DISPLAY", result.stdout)
+
+    def test_standalone_document_paths_in_zle(self):
+        import json
+        for directory, zone in ((self.one, "east coast"), (self.two, "north zone")):
+            (directory/"settings.json").write_text(json.dumps({"deployment": {"us.east": zone}}))
+        # Select the built-in JSON provider alone in a disposable shell.
+        config = self.config.replace('TOKEN_COMPLETION_PROVIDERS=(shell dotenv "$HOME/catalog.zsh")',
+                                     'TOKEN_COMPLETION_PROVIDERS=(json)')
+        config += '\ntoken-completion files --json ./settings.json\n'
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b'print -r -- $dep\t')
+        self.assertEqual(term.probe(), "print -r -- $deployment.")
+        term.send(b'us\t')
+        saved = term.probe()
+        self.assertIn("token-completion lookup", saved)
+        self.assertIn("deployment.us%2Eeast", saved)
+        self.assertNotIn("east coast", saved)
+        self.assertNotIn("shell-overrides", saved)
+        term.send(b'\r')
+        term.until(b'east coast')
+        term.until(b'READY>')
+        self.assertIn(saved, (self.home/"history").read_text())
+        term.send(f'cd ../two; {saved}\r'.encode())
+        term.until(b'north zone')
+        term.until(b'READY>')
+        term.send(b'print -r -- $depl.us\t')
+        self.assertEqual(term.probe(), saved)
+
     def test_scoped_context_in_zle(self):
         # A provider supplies a branch insertion on one Tab, a leaf on the next.
         config = self.config + """
@@ -229,9 +383,16 @@ commands:
     - prefix: []
       completions:
         - option: --profile
-          source: {file: ./credentials, format: ini, select: section-names}
+          markerless: {empty: all}
+          source: {file: ./credentials, select: section-names}
+        - option: --account
+          markerless: {empty: native}
+          source: {file: ./credentials, select: section-names}
+        - position: 1
+          markerless: {empty: native}
+          source: {file: ./settings.json, select: leaf-values}
         - option: --value
-          source: {file: ./settings.json, format: json, select: leaf-values}
+          source: {file: ./settings.json, select: leaf-values}
 """)
         exe = self.home / "probe"
         exe.write_text("#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
@@ -242,18 +403,51 @@ commands:
         config = self.config + f"""
 path=("$HOME" $path)
 SHELL_OVERRIDES_MANIFEST_DIR="$HOME/manifests"
-TOKEN_COMPLETION_PROVIDERS=(shell_overrides)
+TOKEN_COMPLETION_PROVIDERS=(shell_overrides ini json)
 source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
 """
         term = Terminal(self.home, config, self.env, self.one)
         self.addCleanup(term.close)
+        for prefix in ("probe --profile ", "probe --profile="):
+            for query in ("", "wo"):
+                term.send((prefix + query).encode() + b"\t")
+                menu = term.until(b"work-read-stage")
+                self.assertNotIn(b"NEVER_DISPLAY", menu)
+                term.send(b"stage")
+                term.until(b"1/")
+                term.send(b"\r")
+                term.picker_closed()
+                self.assertNotIn("lookup", term.probe())
+                term.send(b"\r")
+                term.until(b"work-read-stage>")
+                term.until(b"READY>")
+
+        # An unclaimed bare argument and the positional declaration's native
+        # empty policy both delegate to the saved widget. Dollar tokens still
+        # reach the existing guarded provider.
+        for line in ("probe ", "probe --account ", "probe --account=", "probe other dep", "echo --profile=wo"):
+            term.send(line.encode() + b"\t")
+            self.assertEqual(term.probe(), line + ":fallback")
+            term.send(b"\x15")
+
+        term.send(b"probe dep.us\t")
+        literal = term.probe()
+        self.assertNotIn("lookup", literal)
+        term.send(b"\r")
+        term.until(b"<first value>")
+        term.until(b"READY>")
+        term.send(f"cd ../two; {literal}\r".encode())
+        term.until(b"<first value>")
+        term.until(b"READY>")
+        term.send(b"cd ../one\r")
+        term.until(b"READY>")
         term.send(b'probe --profile=$wo\t')
         menu = term.until(b'work-read-stage')
         self.assertNotIn(b'NEVER_DISPLAY', menu)
         term.send(b'stage')
         term.until(b'1/')
         term.send(b'\r')
-        term.until(b'\x1b[?1049l')
+        term.picker_closed()
         self.assertIn("lookup", term.probe())
         term.send(b'\r')
         term.until(b'<--profile=work-read-stage>')
@@ -267,6 +461,65 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
         term.send(f'cd ../two; {saved}\r'.encode())
         term.until(b'<second value>')
 
+    def test_argument_context_in_zle(self):
+        config = self.config + """
+token_provider_catalog_context() { token_completion_offer legacy source WRONG; }
+token_provider_catalog_argument_context() {
+  local mode=$1 fragment=$2 cmd=$3 opt=$4 form=$5
+  shift 5
+  [[ $cmd == deploy ]] || return
+  case "$form:$opt" in
+    equals:--region|separate:--region) token_completion_scope ;;
+    positional:) [[ $# == 0 || $1 == --verbose || $1 == -- ]] || return; token_completion_scope ;;
+    *) return ;;
+  esac
+  [[ $fragment == (east|''|--east|élément:un/deux) ]] || return
+  token_completion_offer zone file "${mode}_zone"
+}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        for typed, expected in (
+            ("deploy --region=", "deploy --region=literal_zone"),
+            ("deploy --region --east", "deploy --region literal_zone"),
+            ("deploy --verbose --east", "deploy --verbose --east:fallback"),
+            ("deploy élément:un/deux", "deploy literal_zone"),
+            ("deploy --region east", "deploy --region literal_zone"),
+            ("deploy --region ", "deploy --region literal_zone"),
+            ("deploy east", "deploy literal_zone"),
+            ("deploy -- --east", "deploy -- literal_zone"),
+            ("deploy --verbose east", "deploy --verbose literal_zone"),
+            ("deploy ", "deploy literal_zone"),
+            ("deploy $east", "deploy token_zone"),
+            ("deploy --region=$east", "deploy --region=token_zone"),
+            ("deploy --region=W", "deploy --region=W:fallback"),
+            ("deploy --reg", "deploy --reg:fallback"),
+            ("deploy OTHER", "deploy OTHER:fallback"),
+            ("deploy >east", "deploy >east:fallback"),
+            ("deploy # ", "deploy # :fallback"),
+            ("deploy \'east", "deploy \'east:fallback"),
+            ("echo SOLO_SHE", "echo SOLO_SHE:fallback"),
+            ("echo --unknown=$NO_MATCH_ZZZ", "echo --unknown=$NO_MATCH_ZZZ:fallback"),
+        ):
+            with self.subTest(typed=typed):
+                term.send(typed.encode() + b"\t")
+                self.assertEqual(term.probe(), expected)
+                term.send(b"\x15")
+        term.send(b"deploy east tail" + b"\x1b[D" * 5 + b"\t")
+        self.assertEqual(term.probe(), "deploy literal_zone tail")
+
+    def test_picker_tab_and_backtab_cycle(self):
+        term = Terminal(self.home, self.config, self.env, self.one)
+        self.addCleanup(term.close)
+        for keys, insertion in ((b"\x1b[Z", "second"), (b"\t\t", "first")):
+            term.send(b"print $TWINS\t")
+            opened = term.until(b"Enter  insert")
+            self.assertNotIn(b"\x1b[?1049h", opened)
+            term.send(keys + b"\r")
+            term.picker_closed()
+            self.assertEqual(term.probe(), "print " + insertion)
+            term.send(b"\x15")
+
     def test_native_directory_components(self):
         (self.one / "home/randall/projects").mkdir(parents=True)
         config = self.config.replace("bindkey '^I' fallback", "autoload -Uz compinit; compinit -D")
@@ -274,6 +527,22 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
         self.addCleanup(term.close)
         term.send(b'cd h/r/p\t')
         self.assertEqual(term.probe().rstrip("/ "), "cd home/randall/projects")
+
+    def test_picker_preserves_wrapped_right_buffer_and_cursor(self):
+        term = Terminal(self.home, self.config, self.env, self.one)
+        self.addCleanup(term.close)
+        tail = b" " + b"x" * 150
+        term.send(b"print $TWINS" + tail + b"\x1b[D" * len(tail) + b"\t")
+        term.until(b"Enter  insert")
+        term.send(b"\x1b")
+        term.picker_closed()
+        self.assertEqual(term.probe(), "print $TWINS" + tail.decode())
+        term.send(b"\t")
+        term.until(b"Enter  insert")
+        term.send(b"\x1b[Z\r")
+        term.picker_closed()
+        term.send(b"!")
+        self.assertEqual(term.probe(), "print second!" + tail.decode())
 
     def test_picker_options(self):
         capture = self.home / "capture-fzf"
@@ -288,7 +557,11 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
                 args = run.stdout.splitlines()
                 self.assertIn("--prompt=" + ("› " if value is None else value), args)
                 self.assertIn("--no-border", args)
+                self.assertIn("--height=~10", args)
                 self.assertFalse(any(arg.startswith("--border-label") for arg in args))
+        short = self.zsh(SOURCE + '\nLINES=6; _tc_fzf="$HOME/capture-fzf"; _tc_pick')
+        self.assertIn("--height=~3", short.stdout.splitlines())
+        self.assertIn("--info=hidden", short.stdout.splitlines())
 
     def test_zle(self):
         term = Terminal(self.home, self.config, self.env, self.one)
@@ -312,14 +585,14 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
             screen += term.until(b'[catalog]')
         self.assertNotIn(b'secret one', screen)
         term.send(b"\x1b")
-        term.until(b"\x1b[?1049l")
+        term.picker_closed()
         self.assertEqual(term.probe(), "printf $LAB_EN")
         term.send(b'\t')
         term.until(b'Look up ')
         term.send(b'.env')
         term.until(b'1/')
         term.send(b'\r')
-        term.until(b'\x1b[?1049l')
+        term.picker_closed()
         line = term.probe()
         self.assertEqual(line, 'printf "$(token-completion dotenv LAB_ENV)"')
         term.send(b'\r')
@@ -332,7 +605,7 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
         term.send(b'print $TWINS\t')
         term.until(b'Look up ')
         term.send(b'\x1b[B\r')
-        term.until(b"\x1b[?1049l")
+        term.picker_closed()
         self.assertEqual(term.probe(), 'print second')
 
     def test_keymaps_and_resourcing(self):

@@ -437,7 +437,7 @@ def main():
     lock = config/"providers.lock"
     try:
         if args.action in {"install", "update"}:
-            sync(lock, cache, entries, args.action == "update", {"shell", "dotenv", *args.reserved})
+            sync(lock, cache, entries, args.action == "update", {"shell", "dotenv", "ini", "toml", "json", "yaml", *args.reserved})
         else:
             inspect(entries, args.available, load_lock(lock), cache, args.action == "resolve",
                     dict(args.unavailable))

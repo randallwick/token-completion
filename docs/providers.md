@@ -1,7 +1,7 @@
 # Provider sources and pins
 
 Put `TOKEN_COMPLETION_PROVIDERS` in your zsh configuration **before** sourcing
-the plugin. This example selects both built-ins, an optional provider from
+the plugin. This example selects two built-ins, an optional provider from
 another loaded plugin, one file you edit locally and one provider tracked from
 GitHub. Replace the example path and repository with your own.
 
@@ -17,7 +17,8 @@ typeset -ga TOKEN_COMPLETION_PROVIDERS=(
 
 | Entry | How it becomes available |
 | --- | --- |
-| `shell`, `dotenv` | Built into the completion plugin. |
+| `shell`, `dotenv` | Built-in shell parameter and dotenv key providers. |
+| `ini`, `toml`, `json`, `yaml` | Built-in document providers. Configure their file arrays or run `token-completion files`. |
 | `team_tokens` | A loaded zsh function implements the named provider ABI. Either plugin may load first. |
 | Absolute file path | The plugin sources your local file. Use this form during provider development. |
 | `github:OWNER/REPO@REF:FILE` | The manager locks a commit and materializes its verified files under your XDG cache. |
@@ -110,9 +111,30 @@ insertions let providers display a key while inserting a lookup expression.
 
 ## Command and option context
 
-In addition to the version-1 query function, a provider can define
+Implement `token_provider_ID_argument_context MODE FRAGMENT COMMAND OPTION FORM [ARG ...]`
+to offer candidates at specific arguments. The widget supplies `literal` for
+unmarked text and `token` for a fragment beginning with `$`. The fragment
+excludes the marker. An empty fragment is meaningful in either mode.
+
+| Form | Option and preceding arguments |
+| --- | --- |
+| `equals` | `--profile=wo` supplies `--profile` and the argv before that option. |
+| `separate` | `--profile wo` supplies `--profile` and the argv before that option. The provider decides whether the preceding word takes a value. |
+| `positional` | The option is empty. Preceding arguments count from the command, excluding redirections. The first argument has no preceding arguments. |
+
+The provider decides whether it owns this position and what to do with an empty
+fragment. For a match, call `token_completion_scope` and then offer candidates.
+For an undeclared position, return without claiming it. If a declared option
+requests native completion, claim it and offer zero rows. An unclaimed
+`separate` form can be offered to the same provider again as `positional`,
+with the flag added back to the preceding argv. This lets a provider distinguish
+a flag that consumes a value from a standalone switch. Unmarked text never triggers a global token search. The
+widget saves the original argument span so insertion preserves an adjacent
+`--option=` and text after the cursor.
+
+Providers using the earlier option-only interface can keep
 `token_provider_<id>_context FRAGMENT COMMAND OPTION FORM [ARG ...]`.
-The widget calls the hook for enabled providers at `--option=$fragment` and
+The widget uses it when the provider has no argument-context hook, at `--option=$fragment` and
 `--option $fragment` positions (also short options). `FORM` is `equals` or
 `separate`. The fragment excludes the dollar sign and can be empty. Additional
 arguments are the preceding words of the active command with shell quoting
@@ -128,8 +150,79 @@ quoted deferred lookup. All insertions leave the line editable. With no
 candidates the widget delegates to the existing Tab binding. Returning from
 the hook without claiming scope leaves ordinary providers available.
 
-The context hook is additive. Existing `token_provider_<id>_query` functions
-continue to receive flat shell identifiers and use `token_completion_emit`.
-To exercise the cross-plugin PTY test, set `SHELL_OVERRIDES_TEST_PLUGIN` to
-the absolute path of the shell-overrides plugin entry point before running
-the suite, and select a PyYAML-capable `SHELL_OVERRIDES_PYTHON`.
+### Delegate to a document provider
+
+Choose the helper that matches the requested insertion. Both show the same names and provenance in the picker.
+
+| Helper | What happens on selection |
+| --- | --- |
+| `token_completion_file_literal` | Resolve the chosen leaf, run its guard if present, and quote the result as a single shell word. History stores the literal. |
+| `token_completion_file` | Insert a quoted lookup expression. Replay reads the recorded path, and zsh trims trailing newlines. |
+
+Both helpers allow another Tab to descend from a selected container. The
+literal helper inserts a bare path prefix and the deferred helper keeps its
+`$` marker. Canceling the picker performs no value lookup.
+
+For example, a deferred source uses the following signature.
+
+```zsh
+token_completion_file [--exact] "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION [DECLARED_FORMAT]]
+```
+
+The shared loader implements the four built-in file formats. A third-party
+query or context provider can call this API to use any of those enabled parsers.
+
+The first four arguments are the typed fragment without `$`, format name,
+selection policy and source file. Pass `auto` as the format to select an enabled
+document parser using the selection policy, filename and, when necessary, the
+document contents. A saved lookup records the selected parser ID. For example,
+`section-names` requires the INI provider even for an extensionless file.
+The guard, command and option are optional as a group. The helper emits matching
+rows through `token_completion_offer`. A hook that needs exclusive candidates
+calls `token_completion_scope` first.
+
+| Selection | Result |
+| --- | --- |
+| `leaf-values` | Navigate maps and arrays one level at a time. A leaf lookup returns the scalar value. This is the policy used by the four built-in document providers. |
+| `keys` | Offer existing top-level map keys. A lookup returns the selected key name. |
+| `section-names` | INI only. Offer literal section names. A lookup can return the section name but cannot descend into a section. |
+
+INI option names preserve case; interpolation is disabled. JSON and YAML use
+their parsers’ supported encodings, INI accepts UTF-8 with an optional BOM,
+and TOML uses UTF-8. Supported map keys are nonempty strings without NUL.
+Direct `lookup` output preserves all whitespace. Zsh removes trailing newlines
+from a value captured by ordinary command substitution. Boolean
+and null leaves use JSON spellings; date and time values use ISO format.
+Lookups diagnose unsupported scalars or missing paths without printing source
+values. Provider code can reuse this helper with explicitly configured files
+even if that format's standalone file array is empty.
+
+By default, a deferred file completion inserts a command such as
+`"$(token-completion lookup json leaf-values ./settings.json region)"`.
+Two opt-ins change its behavior independently:
+
+- Supply the leading `--exact` argument to preserve trailing newlines in the
+  command argument. The generated expression uses `lookup-exact`, which adds a
+  final dot on success so zsh can strip the dot after capturing the value.
+- Supply a zsh function as `GUARD` with its command and option to check the
+  live declaration before each lookup. Previously generated guarded lookups
+  continue to call their guard.
+
+With a guard, the underlying lookup takes these arguments:
+
+```text
+token-completion lookup FORMAT SELECT FILE PATH GUARD CMD OPTION [DECLARED_FORMAT]
+```
+
+At execution, `GUARD CMD OPTION FORMAT SELECT FILE` must succeed before the
+plugin opens the file. A removed guard or rejected declaration fails the lookup.
+If the contextual hook also supplied `DECLARED_FORMAT`, the guard receives
+`CMD OPTION DECLARED_FORMAT FORMAT SELECT FILE`. This lets it distinguish an
+inferred declaration (`auto`) from an explicit declaration on replay.
+The manifest provider checks its live declarations. Token-completion handles
+parsing, component matching, display and replay.
+
+The context hook is additive. Existing version-1 providers can keep emitting
+flat candidates through `token_completion_emit`. To exercise the cross-plugin
+PTY test, set `SHELL_OVERRIDES_TEST_PLUGIN` to the external plugin's absolute
+entry point and put a PyYAML-capable Python on `PATH`.
