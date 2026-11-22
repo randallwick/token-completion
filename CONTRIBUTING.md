@@ -49,7 +49,7 @@ version=$(sed -n 's/^  version = "\([^"]*\)";$/\1/p' package.nix)
 test -n "$version" &&
   git merge-base --is-ancestor origin/stable "$candidate" &&
   git tag -a "v$version" "$candidate" -m "Release $version" &&
-  git push --atomic origin "$candidate:refs/heads/stable" "refs/tags/v$version"
+  git push --atomic origin "${candidate}:refs/heads/stable" "refs/tags/v$version"
 ```
 
 Keep existing version tags at their original commits. If a released version
