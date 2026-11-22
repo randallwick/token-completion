@@ -144,8 +144,8 @@ Run `token-completion providers install` after loading the plugin. To advance th
 | `token-completion providers list` | Show configured providers, status and pinned GitHub revisions. |
 | `token-completion providers install` | Resolve new entries, reuse existing pins and restore missing cached sources. |
 | `token-completion providers update` | Resolve configured refs again and report old and new pins. |
-| `token-completion files --FORMAT FILE ...` | Register source paths in this shell. Repeat `--ini`, `--toml`, `--json` or `--yaml` for additional files. |
-| `token-completion lookup FORMAT SELECT FILE PATH [GUARD CMD OPTION]` | Resolve an exact document path at execution time. An optional provider guard must approve the source before the lookup. |
+| `token-completion files [--format FORMAT] -f FILE ...` | Register documents in this shell. Repeat `-f` or `--file`. Use `--format` before a file to select its parser explicitly. |
+| `token-completion lookup FORMAT SELECT FILE PATH [GUARD CMD OPTION [DECLARED_FORMAT]]` | Resolve an exact document path at execution time. An optional provider guard must approve the source before the lookup. |
 | `token-completion dotenv KEY` | Print the current directory's literal value with no trailing newline. A missing key/file produces a diagnostic and a nonzero exit. An explicitly empty value succeeds quietly. |
 
 ### Dotenv grammar
@@ -159,7 +159,7 @@ Each starts with an empty file list. In a scratch directory, try a JSON source:
 
 ```zsh
 print -r -- '{"deployment":{"region":"eu-west-1"}}' > settings.json
-token-completion files --json ./settings.json
+token-completion files -f ./settings.json
 ```
 
 Type `print -r -- $depl.reg` and press Tab. A unique prefix resolves each level:
@@ -168,7 +168,28 @@ the editable line now contains a quoted `token-completion lookup` for
 another directory reads **that directory’s** `settings.json`. Paths beginning with
 `~` expand at lookup; use an absolute path for a fixed location.
 
-Add more documents with `token-completion files --ini FILE --json FILE ...`.
+Register multiple files in one call. Here only the extensionless `./config`
+gets an explicit format:
+
+```zsh
+token-completion files -f ./settings.json --format toml -f ./config --file ./deploy.yml
+```
+
+A recognized extension selects its enabled provider, including either `.yaml` or
+`.yml` for YAML. A malformed file with a recognized extension produces a
+diagnostic from that selection. For unfamiliar or missing extensions, the loader
+reads the file once and compares the interpretations offered by enabled parsers
+that support the requested selection. If several produce the same structure
+and value types, the loader chooses the first in its fixed order (JSON, TOML,
+INI, YAML). If interpretations differ, the diagnostic names the candidates. Use `--format FORMAT -f FILE` to choose one.
+For example, an extensionless file containing `[deploy]` followed by
+`region = "west"` preserves the quotes in INI and strips them in TOML.
+
+Registration records the chosen provider. Repeated Tab presses and history
+replay use that provider while reading fresh values from the source. Disabling
+the provider prevents its saved lookups from running. Explicit spellings such
+as `--json FILE` still work.
+
 To keep the selection across shells, set the corresponding arrays in your zsh
 configuration, for example:
 
@@ -192,8 +213,9 @@ in the generated lookup. Present empty strings resolve quietly.
 ## Complete tokens for a command option
 
 A provider may select a different policy for a particular command or option.
-For example, shell-overrides can declare an INI credentials file as a
-`section-names` source for one command’s `--profile` option. At that option,
+For example, shell-overrides can declare `~/.aws/credentials` as a
+`section-names` source for one command’s `--profile` option. With the INI
+provider enabled, this selection identifies INI even without an extension. At that option,
 completion shows only matching section names and the final lookup returns
 the name itself. Credential option names and values stay out of the picker.
 The optional plugin owns its manifest and checks whether the declaration is

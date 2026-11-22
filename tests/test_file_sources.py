@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "file_source.py"
@@ -65,6 +66,92 @@ class Sources(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b"")
             self.assertNotIn(b"secret user text", result.stderr)
+
+    def detect(self, file, formats, select="leaf-values"):
+        return subprocess.run([sys.executable, HELPER, "detect", select, file, *formats],
+                              text=True, capture_output=True, timeout=5)
+
+    def test_authoritative_extensions_and_selection_capabilities(self):
+        providers = ("ini", "yaml", "json", "toml")
+        file = self.home / "values.JSON"
+        file.write_text('{"region":"private_value"}')
+        self.assertEqual(self.detect(file, providers).stdout, "json\n")
+        disabled = self.detect(file, ["yaml"])
+        self.assertNotEqual(disabled.returncode, 0)
+        self.assertIn("disabled", disabled.stderr)
+        wrong_policy = self.detect(file, providers, "section-names")
+        self.assertNotEqual(wrong_policy.returncode, 0)
+        self.assertIn("does not support", wrong_policy.stderr)
+        file.write_text("region: private_value")
+        invalid = self.detect(file, providers)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertNotIn("private_value", invalid.stderr + invalid.stdout)
+        self.assertIn("malformed JSON at line 1, column 1", invalid.stderr)
+        self.assertNotIn("yaml", invalid.stderr)
+
+        file.rename(self.home/"values.yml")
+        self.assertEqual(self.detect(self.home/"values.yml", providers).stdout, "yaml\n")
+        unknown = self.home / "credentials"
+        unknown.write_text("[DEFAULT]\nregion=private_value\n")
+        self.assertEqual(self.detect(unknown, providers, "section-names").stdout, "ini\n")
+        self.assertFalse(self.detect(unknown, [], "section-names").stdout)
+
+    def test_unknown_extension_compares_typed_interpretations(self):
+        data = self.home / "values.unknown"
+        data.write_text('{"dotted.key":{"enabled":true},"key-bytes":"private_value"}')
+        # JSON is a subset of YAML here. Equivalent results resolve consistently
+        # regardless of configuration order.
+        for formats in (["yaml", "json"], ["json", "yaml", "toml", "ini"]):
+            self.assertEqual(self.detect(data, formats).stdout, "json\n")
+        data.write_text("[deploy]\nsecret=123456789\n")
+        ambiguous = self.detect(data, ["ini", "toml", "yaml"])
+        self.assertNotEqual(ambiguous.returncode, 0)
+        self.assertEqual(ambiguous.stdout, "")
+        self.assertIn("ambiguous", ambiguous.stderr)
+        self.assertIn("ini", ambiguous.stderr)
+        self.assertIn("toml", ambiguous.stderr)
+        self.assertNotIn("123456789", ambiguous.stderr)
+        data.write_text("[deploy]\n")
+        self.assertEqual(self.detect(data, ["ini", "toml"]).stdout, "toml\n")
+        data.write_text("simple scalar")
+        scalar = self.detect(data, ["yaml"])
+        self.assertNotEqual(scalar.returncode, 0)
+        self.assertIn("root cannot be navigated", scalar.stderr)
+        data.write_text("[1, 2, 3]")
+        self.assertEqual(self.detect(data, ["yaml", "json"]).stdout, "json\n")
+        self.assertNotEqual(self.detect(data, ["yaml", "json"], "keys").returncode, 0)
+
+    def test_detect_reads_one_snapshot_and_handles_aliases(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("token_file_source", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        file = self.home/"shared"
+        with patch.object(helper, "read_document", return_value=b'{"a.b":[1,2]}') as reader:
+            self.assertEqual(helper.detect("leaf-values", str(file), ["ini", "toml", "json", "yaml"]), "json")
+        reader.assert_called_once_with(str(file))
+        # Two parsers can advertise one suffix. Compare all eligible parses.
+        other_ini = helper.DocumentParser(helper.parse_ini, (".toml",), helper.COMMON)
+        with patch.dict(helper.PARSERS, ini=other_ini), patch.object(helper, "read_document", return_value=b"[s]\nx=1"):
+            with self.assertRaisesRegex(helper.DetectionError, "ambiguous.*toml.*ini"):
+                helper.detect("keys", "settings.toml", ["ini", "toml"])
+        def missing_parser(_data):
+            raise ModuleNotFoundError("missing", name="yaml")
+        unavailable = helper.DocumentParser(missing_parser, (".yaml",), helper.COMMON)
+        with patch.dict(helper.PARSERS, yaml=unavailable), patch.object(helper, "read_document", return_value=b"x"):
+            with self.assertRaisesRegex(helper.DetectionError, "unavailable; missing module yaml"):
+                helper.detect("leaf-values", "data.yaml", ["yaml", "ini"])
+        for left, right in [(True, 1), (1, 1.0), ({"a.b": "v"}, {"a": {"b": "v"}}),
+                            ({True: 1}, {1: 1}), ({"x": [0.0]}, {"x": [-0.0]})]:
+            self.assertFalse(helper.same_document(left, right))
+        self.assertTrue(helper.same_document({"mixed": {1: "numeric", "1": "text"}},
+                                             {"mixed": {"1": "text", 1: "numeric"}}))
+        left, right = [], []
+        left.append(left)
+        right.append(right)
+        self.assertTrue(helper.same_document(left, right))
+        file.write_text("node: &root [*root]\n")
+        self.assertEqual(self.detect(file, ["json", "yaml"]).stdout, "yaml\n")
 
     def test_lookup_guard_runs_before_resolving_the_document(self):
         file = self.home/"document"

@@ -202,6 +202,88 @@ done
         for file in ("./local prefs.ini", "./services.toml", "./app.json", "./deploy.yml", "./extra.json"):
             self.assertIn(file, check.stdout.splitlines())
 
+    def test_register_files_detects_once_and_publishes_atomically(self):
+        (self.one / "settings.JSON").write_text('{"region": "source value"}')
+        (self.one / "mislabeled.toml").write_text('{"region": "override value"}')
+        wrapper = self.home / "parser"
+        wrapper.write_text('#!/bin/sh\n[ "$2" != detect ] || echo detect >> "$HOME/detections"\nexec python3 "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.zsh(SOURCE + """
+_tc_python=$HOME/parser
+TOKEN_COMPLETION_PROVIDERS=(json)
+token-completion files -f settings.JSON --format json --file mislabeled.toml || exit 11
+token-completion files --format toml -f something && exit 12
+token-completion files --json first.json -f missing.toml && exit 13
+token-completion files --json first.json --format && exit 14
+token-completion files --format json && exit 15
+token-completion files --file && exit 16
+token-completion files --json first.json --ini other.ini && exit 17
+token_completion_offer() { print -r -- "$3"; }
+token_provider_json_query reg
+token_provider_json_query reg
+print -rl -- CATALOG "${TOKEN_COMPLETION_JSON_FILES[@]}"
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split("CATALOG\n")[1].splitlines(), ["settings.JSON", "mislabeled.toml"])
+        self.assertIn("lookup json leaf-values mislabeled.toml", result.stdout)
+        self.assertEqual((self.home / "detections").read_text().splitlines(), ["detect", "detect"])
+        self.assertNotIn("source value", result.stdout + result.stderr)
+
+    def test_token_query_cannot_register_an_unimplemented_document_parser(self):
+        check = self.zsh(SOURCE + """
+typeset -g token_provider_xml_version=1 token_provider_xml_file_format=1
+token_provider_xml_query(){ return 0; }
+TOKEN_COMPLETION_PROVIDERS=(xml json)
+token-completion files --json keep.json || exit 2
+token-completion files --json first.json --format xml -f /dev/null && exit 3
+token-completion files --xml /dev/null && exit 4
+print -r -- "${TOKEN_COMPLETION_JSON_FILES[@]}"
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout, "keep.json\n")
+        self.assertIn("xml", check.stderr)
+
+    def test_manifest_inference_cache_and_recovery(self):
+        (self.one/"settings").write_text('[deploy]\nzone=123456789\n')
+        (self.two/"settings").write_text('{"deploy":{"zone":true}}')
+        (self.two/"one.json").symlink_to("settings")
+        (self.two/"two.yaml").symlink_to("settings")
+        wrapper = self.home / "parser"
+        wrapper.write_text('#!/bin/sh\n[ "$2" != detect ] || echo detect >> "$HOME/detections"\nexec python3 "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.zsh(SOURCE + """
+_tc_python=$HOME/parser
+TOKEN_COMPLETION_PROVIDERS=(json ini toml yaml)
+token_completion_offer() { print -r -- "$3"; }
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+print -r -- '{"deploy":{"zone":"west"}}' > settings
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+cd ../two
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./one.json
+token_completion_file dep.z auto leaf-values ./two.yaml
+TOKEN_COMPLETION_PROVIDERS=(yaml)
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep.z auto leaf-values ./settings
+token_completion_file dep auto keys ./settings
+token-completion lookup json leaf-values ./settings deploy.zone && exit 18
+true
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("ambiguous"), 1, result.stderr)
+        self.assertIn("ini", result.stderr)
+        self.assertIn("toml", result.stderr)
+        self.assertNotIn("123456789", result.stderr)
+        self.assertEqual(result.stdout.count("lookup json leaf-values ./settings"), 3)
+        self.assertIn("lookup json leaf-values ./one.json", result.stdout)
+        self.assertIn("lookup yaml leaf-values ./two.yaml", result.stdout)
+        self.assertEqual(result.stdout.count("lookup yaml leaf-values ./settings"), 2)
+        self.assertIn("lookup yaml keys ./settings", result.stdout)
+        self.assertEqual(len((self.home/"detections").read_text().splitlines()), 8)
+        self.assertIn("disabled", result.stderr)
+
     def test_each_builtin_document_provider_emits_from_its_file_array(self):
         documents = {
             "ini": "[deployment]\nzone=DO_NOT_DISPLAY\n",
@@ -292,9 +374,9 @@ commands:
     - prefix: []
       completions:
         - option: --profile
-          source: {file: ./credentials, format: ini, select: section-names}
+          source: {file: ./credentials, select: section-names}
         - option: --value
-          source: {file: ./settings.json, format: json, select: leaf-values}
+          source: {file: ./settings.json, select: leaf-values}
 """)
         exe = self.home / "probe"
         exe.write_text("#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
@@ -305,7 +387,7 @@ commands:
         config = self.config + f"""
 path=("$HOME" $path)
 SHELL_OVERRIDES_MANIFEST_DIR="$HOME/manifests"
-TOKEN_COMPLETION_PROVIDERS=(shell_overrides)
+TOKEN_COMPLETION_PROVIDERS=(shell_overrides ini json)
 source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
 """
         term = Terminal(self.home, config, self.env, self.one)

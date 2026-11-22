@@ -1,6 +1,7 @@
 # Source after your usual completion initialization.
 typeset -g _tc_root=${${(%):-%x}:A:h}
 typeset -g _tc_python=python3 _tc_fzf=fzf
+typeset -gA _tc_detected_formats _tc_detection_errors
 typeset -gA _tc_file_ids _tc_file_paths _tc_file_sources _tc_file_errors _tc_prepared _tc_fallbacks
 
 # Reusable filter: one unmodified NUL-terminated result per matching input.
@@ -40,15 +41,83 @@ token_provider_dotenv_query() {
   done < <(command "$_tc_python" "$_tc_root/dotenv.py" keys)
 }
 
+# This registry connects the built-in document readers to their source arrays.
+# A third-party token query cannot advertise a reader the document engine lacks.
+typeset -gA _tc_file_readers=(
+  [ini]=TOKEN_COMPLETION_INI_FILES   [toml]=TOKEN_COMPLETION_TOML_FILES
+  [json]=TOKEN_COMPLETION_JSON_FILES [yaml]=TOKEN_COMPLETION_YAML_FILES
+)
+
+_tc_file_formats() {
+  emulate -L zsh
+  local -a _tc_entries
+  local _tc_entry _tc_id
+  _tc_entries_for_shell
+  _tc_formats=()
+  for _tc_entry in "${_tc_entries[@]}"; do
+    _tc_id=${_tc_file_ids[$_tc_entry]:-$_tc_entry}
+    _tc_valid_provider "$_tc_id" || continue
+    (( ${+_tc_file_readers[$_tc_id]} )) || continue
+    (( ${_tc_formats[(Ie)$_tc_id]} )) || _tc_formats+=("$_tc_id")
+  done
+}
+
+_tc_file_diagnostic() {
+  emulate -L zsh
+  [[ $2 == "${_tc_detection_errors[$1]}" ]] && return 0
+  _tc_detection_errors[$1]=$2
+  if zle >/dev/null 2>&1; then zle -M "$2"; else print -ru2 -- "$2"; fi
+}
+
+# A manifest can refer to the same relative filename in different projects.
+# Keep only successful parser selections, scoped to physical path and parsers.
+_tc_manifest_format() {
+  emulate -L zsh
+  setopt extendedglob
+  local _tc_policy=$1 _tc_doc=$2 _tc_path=$2 _tc_result
+  case $_tc_path in
+    ('~/'*) _tc_path=$HOME/${_tc_path#\~/} ;;
+    ('~'[a-zA-Z0-9_-]##'/'*)
+      local _tc_tilde=${_tc_path%%/*} _tc_home
+      # Only expand the validated username, never the file's glob characters.
+      _tc_home=$(print -r -- ${~_tc_tilde} 2>/dev/null) && _tc_path=$_tc_home/${_tc_path#*/} ;;
+  esac
+  local -a _tc_identity=("${_tc_path:a}" "${_tc_path:A}" "$_tc_policy" "${(@o)_tc_formats}")
+  local _tc_key=${(j: :)${(@q)_tc_identity}}
+  if (( ${+_tc_detected_formats[$_tc_key]} )); then
+    _tc_format=${_tc_detected_formats[$_tc_key]}
+    return 0
+  fi
+  if ! _tc_result=$(command "$_tc_python" "$_tc_root/file_source.py" detect "$_tc_policy" "$_tc_doc" "${_tc_formats[@]}" 2>&1); then
+    _tc_file_diagnostic "$_tc_key" "$_tc_result"
+    return 1
+  fi
+  (( ${_tc_formats[(Ie)$_tc_result]} )) || return 1
+  unset "_tc_detection_errors[$_tc_key]"
+  _tc_detected_formats[$_tc_key]=$_tc_result
+  _tc_format=$_tc_result
+}
+
 # Document providers share file parsing, path traversal and deferred insertion.
 # A scoped provider may call this same API with an execution-time policy guard.
 token_completion_file() {
   emulate -L zsh
-  (( $# == 4 || $# == 7 )) || return 2
+  (( $# == 4 || $# == 7 || $# == 8 )) || return 2
   local _tc_fragment_text=$1 _tc_format=$2 _tc_selection=$3 _tc_file=$4
   shift 4
   local _tc_kind _tc_display _tc_node _tc_insertion
-  local -a _tc_lookup
+  local -a _tc_lookup _tc_formats
+  _tc_file_formats
+  if [[ $_tc_format == auto ]]; then
+    _tc_manifest_format "$_tc_selection" "$_tc_file" || return 1
+  else
+    local _tc_key="explicit ${(q)_tc_selection} ${(q)_tc_file} ${(q)_tc_format}"
+    if (( ! ${_tc_formats[(Ie)$_tc_format]} )); then
+      _tc_file_diagnostic "$_tc_key" "token-completion: ${(q)_tc_file}: parser ${(q)_tc_format} is unavailable or disabled"
+      return 1
+    fi
+    unset "_tc_detection_errors[$_tc_key]"
+  fi
   while IFS= read -r -d '' _tc_kind && IFS= read -r -d '' _tc_display && IFS= read -r -d '' _tc_node; do
     if [[ $_tc_kind == branch ]]; then
       _tc_insertion='$'${_tc_node}
@@ -64,8 +133,9 @@ token_completion_file() {
 _tc_document_query() {
   emulate -L zsh
   local _tc_format=$1 _tc_fragment_text=$2 _tc_file
-  shift 2
-  local -aU _tc_documents=("$@")
+  local _tc_setting=${_tc_file_readers[$_tc_format]}
+  (( ${+parameters[$_tc_setting]} )) || return 0
+  local -aU _tc_documents=("${(@P)_tc_setting}")
   for _tc_file in "${_tc_documents[@]}"; do
     token_completion_file "$_tc_fragment_text" "$_tc_format" leaf-values "$_tc_file"
   done
@@ -73,22 +143,31 @@ _tc_document_query() {
 
 typeset -g token_provider_ini_version=1 token_provider_toml_version=1
 typeset -g token_provider_json_version=1 token_provider_yaml_version=1
-token_provider_ini_query() { _tc_document_query ini "$1" "${TOKEN_COMPLETION_INI_FILES[@]}"; }
-token_provider_toml_query() { _tc_document_query toml "$1" "${TOKEN_COMPLETION_TOML_FILES[@]}"; }
-token_provider_json_query() { _tc_document_query json "$1" "${TOKEN_COMPLETION_JSON_FILES[@]}"; }
-token_provider_yaml_query() { _tc_document_query yaml "$1" "${TOKEN_COMPLETION_YAML_FILES[@]}"; }
+token_provider_ini_query() { _tc_document_query ini "$1"; }
+token_provider_toml_query() { _tc_document_query toml "$1"; }
+token_provider_json_query() { _tc_document_query json "$1"; }
+token_provider_yaml_query() { _tc_document_query yaml "$1"; }
 
 _tc_document_lookup() {
   emulate -L zsh
   setopt extendedglob
-  if (( $# == 7 )); then
+  local -a _tc_formats _tc_guard_args
+  _tc_file_formats
+  if (( ! ${_tc_formats[(Ie)$1]} )); then
+    print -ru2 -- "token-completion: document parser ${(q)1} is unavailable or disabled"
+    return 1
+  fi
+  if (( $# == 7 || $# == 8 )); then
+    _tc_guard_args=("$6" "$7")
+    (( $# == 8 )) && _tc_guard_args+=("$8")
+    _tc_guard_args+=("$1" "$2" "$3")
     if [[ $5 != [a-zA-Z_][a-zA-Z0-9_-]# ]] || (( ! ${+functions[$5]} )) ||
-        ! "$5" "$6" "$7" "$1" "$2" "$3" > /dev/null; then
+        ! "$5" "${_tc_guard_args[@]}" > /dev/null; then
       print -ru2 -- 'token-completion: lookup is no longer authorized by its provider'
       return 1
     fi
   elif (( $# != 4 )); then
-    print -ru2 -- 'usage: token-completion lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION]'
+    print -ru2 -- 'usage: token-completion lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION [DECLARED_FORMAT]]'
     return 2
   fi
   command "$_tc_python" "$_tc_root/file_source.py" get "$1" "$2" "$3" "$4"
@@ -96,27 +175,69 @@ _tc_document_lookup() {
 
 _tc_add_files() {
   emulate -L zsh
-  local -a _tc_ini _tc_toml _tc_json _tc_yaml
-  if (( ! $# || $# % 2 )); then
-    print -ru2 -- 'usage: token-completion files --ini|--toml|--json|--yaml FILE ...'
+  local -a _tc_formats _tc_paths _tc_destinations
+  local _tc_pending _tc_format _tc_file _tc_dest _tc_attr _tc_flag
+  local -i _tc_i
+  _tc_file_formats
+  while (( $# )); do
+    _tc_flag=$1
+    shift
+    case $_tc_flag in
+      --format)
+        if [[ -n $_tc_pending || -z $1 || $1 == -* ]]; then
+          print -ru2 -- 'token-completion: --format takes one parser for the next -f/--file'
+          return 2
+        fi
+        _tc_pending=$1; shift
+        if (( ! ${_tc_formats[(Ie)$_tc_pending]} )); then
+          print -ru2 -- "token-completion: document parser ${(q)_tc_pending} is unavailable or disabled"
+          return 2
+        fi
+        continue ;;
+      -f|--file)
+        _tc_format=$_tc_pending
+        _tc_pending='' ;;
+      --*)
+        # Legacy --json FILE, --ini FILE, etc., use the same registry.
+        _tc_format=${_tc_flag#--}
+        if [[ -n $_tc_pending ]]; then
+          print -ru2 -- 'token-completion: follow --format FORMAT with -f/--file FILE'
+          return 2
+        fi
+        if (( ! ${_tc_formats[(Ie)$_tc_format]} )); then
+          print -ru2 -- "token-completion: document parser ${(q)_tc_format} is unavailable or disabled"
+          return 2
+        fi ;;
+      *) print -ru2 -- "token-completion: unknown file option ${(q)_tc_flag}"; return 2 ;;
+    esac
+    if [[ -z $1 ]]; then
+      print -ru2 -- "token-completion: ${(q)_tc_flag} requires a file path"
+      return 2
+    fi
+    _tc_file=$1; shift
+    if [[ -z $_tc_format ]]; then
+      _tc_format=$(command "$_tc_python" "$_tc_root/file_source.py" detect leaf-values "$_tc_file" "${_tc_formats[@]}") || return 1
+      (( ${_tc_formats[(Ie)$_tc_format]} )) || return 1
+    fi
+    _tc_dest=${_tc_file_readers[$_tc_format]}
+    _tc_attr=${parameters[$_tc_dest]}
+    if [[ -n $_tc_attr && ( $_tc_attr != array* || $_tc_attr == *readonly* ) ]]; then
+      print -ru2 -- "token-completion: $_tc_dest must be a writable array"
+      return 2
+    fi
+    _tc_destinations+=("$_tc_dest")
+    _tc_paths+=("$_tc_file")
+  done
+  if [[ -n $_tc_pending ]] || (( ! $#_tc_paths )); then
+    print -ru2 -- 'usage: token-completion files [--format FORMAT] -f FILE [-f FILE ...]'
     return 2
   fi
-  while (( $# )); do
-    [[ -n $2 ]] || { print -ru2 -- 'token-completion: expected a nonempty file path'; return 2; }
-    case $1 in
-      --ini) _tc_ini+=("$2") ;;
-      --toml) _tc_toml+=("$2") ;;
-      --json) _tc_json+=("$2") ;;
-      --yaml) _tc_yaml+=("$2") ;;
-      *) print -ru2 -- "token-completion: unknown file option ${(q)1}"; return 2 ;;
-    esac
-    shift 2
+  # All options, detections and destination types have been checked.
+  for (( _tc_i=1; _tc_i <= $#_tc_paths; _tc_i++ )); do
+    _tc_dest=${_tc_destinations[_tc_i]}
+    if (( ! ${+parameters[$_tc_dest]} )); then typeset -ga "$_tc_dest"; fi
+    set -A "$_tc_dest" "${(@P)_tc_dest}" "${_tc_paths[_tc_i]}"
   done
-  (( $#_tc_ini )) && TOKEN_COMPLETION_INI_FILES+=("${_tc_ini[@]}")
-  (( $#_tc_toml )) && TOKEN_COMPLETION_TOML_FILES+=("${_tc_toml[@]}")
-  (( $#_tc_json )) && TOKEN_COMPLETION_JSON_FILES+=("${_tc_json[@]}")
-  (( $#_tc_yaml )) && TOKEN_COMPLETION_YAML_FILES+=("${_tc_yaml[@]}")
-  return 0
 }
 
 _tc_valid_provider() {
@@ -267,7 +388,10 @@ _tc_help() {
   print -r -- '  providers list       Show configured sources and their pins'
   print -r -- '  providers install    Materialize missing providers at locked revisions'
   print -r -- '  providers update     Resolve refs and publish their new pins'
-  print -r -- '  files --FORMAT FILE  Add document sources for this shell (repeatable)'
+  print -r -- '  files -f FILE        Register a document and detect its parser (repeatable)'
+  print -r -- '    --file FILE        Long form of -f'
+  print -r -- '    --format FORMAT    Use this enabled parser for the next file'
+  print -r -- '    --json FILE        Shorthand for --format json -f FILE (also ini, toml, yaml)'
   print -r -- '  lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION]'
   print -r -- '                       Read one document key or leaf at execution time'
   print -r -- '  dotenv KEY           Read a literal from .env in this directory'
@@ -419,7 +543,7 @@ _tc_complete() {
       for _tc_id in "${_tc_ids[@]}"; do
         # File providers accept an empty root or a dotted document path.
         # Third-party v1 query functions keep their flat identifier contract.
-        if [[ $_tc_id == (ini|toml|json|yaml) || $_tc_query == [A-Za-z_][A-Za-z_0-9]# ]]; then
+        if (( ${+_tc_file_readers[$_tc_id]} )) || [[ $_tc_query == [A-Za-z_][A-Za-z_0-9]# ]]; then
           "token_provider_${_tc_id}_query" "$_tc_query" >/dev/null
         fi
       done

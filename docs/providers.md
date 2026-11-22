@@ -135,14 +135,20 @@ A contextual hook can use the same document reader as the standalone INI,
 TOML, JSON and YAML providers. Call:
 
 ```zsh
-token_completion_file "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION]
+token_completion_file "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION [DECLARED_FORMAT]]
 ```
 
+The shared loader implements the four built-in file formats. A third-party
+query or context provider can call this API to use any of those enabled parsers.
+
 The first four arguments are the typed fragment without `$`, format name,
-selection policy and source file. The final three arguments are optional as a
-group. The helper emits matching rows through `token_completion_offer`. It does
-not claim the command scope. A hook that needs exclusive candidates calls
-`token_completion_scope` itself first.
+selection policy and source file. Pass `auto` as the format to select an enabled
+document parser using the selection policy, filename and, when necessary, the
+document contents. A saved lookup records the selected parser ID. For example,
+`section-names` requires the INI provider even for an extensionless file.
+The guard, command and option are optional as a group. The helper emits matching
+rows through `token_completion_offer`. A hook that needs exclusive candidates
+calls `token_completion_scope` first.
 
 | Selection | Result |
 | --- | --- |
@@ -163,13 +169,16 @@ For rules that can change, pass a zsh function name as `GUARD` and include
 the command and option. The generated expression invokes:
 
 ```text
-token-completion lookup FORMAT SELECT FILE PATH GUARD CMD OPTION
+token-completion lookup FORMAT SELECT FILE PATH GUARD CMD OPTION [DECLARED_FORMAT]
 ```
 
 At execution, `GUARD CMD OPTION FORMAT SELECT FILE` must succeed before the
 plugin opens the file. A removed guard or rejected declaration fails the lookup.
-This lets a manifest provider keep ownership of its live declarations while the
-completion plugin owns parsing, component matching, display and replay.
+If the contextual hook also supplied `DECLARED_FORMAT`, the guard receives
+`CMD OPTION DECLARED_FORMAT FORMAT SELECT FILE`. This lets it distinguish an
+inferred declaration (`auto`) from an explicit declaration on replay.
+The manifest provider checks its live declarations. Token-completion handles
+parsing, component matching, display and replay.
 
 The context hook is additive. Existing version-1 providers can keep emitting
 flat candidates through `token_completion_emit`. To exercise the cross-plugin
