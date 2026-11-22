@@ -197,7 +197,8 @@ builtin source "$1" >/dev/null || exit 1
 [[ ${TOKEN_PROVIDER_ID:-} =~ '^[A-Za-z_][A-Za-z0-9_]*$' ]] || exit 1
 version=token_provider_${TOKEN_PROVIDER_ID}_version
 query=token_provider_${TOKEN_PROVIDER_ID}_query
-[[ ${(P)version} == 1 ]] && (( ${+functions[$query]} )) || exit 1
+candidates=token_provider_${TOKEN_PROVIDER_ID}_candidates
+[[ ${(P)version} == 1 ]] && (( ${+functions[$query]} || ${+functions[$candidates]} )) || exit 1
 print -rn -- "$TOKEN_PROVIDER_ID"
 """
 
@@ -207,7 +208,7 @@ def abi_id(path):
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     name = result.stdout.decode(errors="replace")
     if result.returncode or not IDENTIFIER.fullmatch(name):
-        raise Error(f"{path.name}: expected a provider ID, interface version 1 and a query function")
+        raise Error(f"{path.name}: expected a provider ID, interface version 1 and a query or candidates function")
     return name
 
 
@@ -437,7 +438,7 @@ def main():
     lock = config/"providers.lock"
     try:
         if args.action in {"install", "update"}:
-            sync(lock, cache, entries, args.action == "update", {"shell", "dotenv", "ini", "toml", "json", "yaml", *args.reserved})
+            sync(lock, cache, entries, args.action == "update", {"shell", "dotenv", "ini", "toml", "json", "yaml", "directory", *args.reserved})
         else:
             inspect(entries, args.available, load_lock(lock), cache, args.action == "resolve",
                     dict(args.unavailable))

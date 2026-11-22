@@ -290,14 +290,14 @@ _tc_valid_provider() {
   setopt extendedglob
   [[ $1 == [a-zA-Z_][a-zA-Z_0-9]# ]] || return 1
   local _tc_version=token_provider_${1}_version
-  [[ ${(P)_tc_version} == 1 ]] && (( $+functions[token_provider_${1}_query] ))
+  [[ ${(P)_tc_version} == 1 ]] && (( $+functions[token_provider_${1}_query] || $+functions[token_provider_${1}_candidates] ))
 }
 
 _tc_discover() {
   emulate -L zsh
-  local _tc_fn _tc_id
-  for _tc_fn in ${(ok)functions[(I)token_provider_*_query]}; do
-    _tc_id=${${_tc_fn#token_provider_}%_query}
+  local _tc_var _tc_id
+  for _tc_var in ${(ok)parameters[(I)token_provider_*_version]}; do
+    _tc_id=${${_tc_var#token_provider_}%_version}
     _tc_valid_provider "$_tc_id" && _tc_available+=("$_tc_id")
   done
 }
@@ -349,6 +349,7 @@ _tc_forget_file() {
   emulate -L zsh
   local _tc_id=${_tc_file_ids[$1]}
   unfunction "token_provider_${_tc_id}_query" 2>/dev/null
+  unfunction "token_provider_${_tc_id}_candidates" 2>/dev/null
   unfunction "token_provider_${_tc_id}_prepare" 2>/dev/null
   unfunction "token_provider_${_tc_id}_context" 2>/dev/null
   unfunction "token_provider_${_tc_id}_argument_context" 2>/dev/null
@@ -591,6 +592,17 @@ token_completion_scope() {
   _tc_scoped=1
 }
 
+# Delegate an argument to an enabled source during the current completion.
+token_completion_from() {
+  emulate -L zsh
+  (( $# >= 2 && ${+_tc_context_rows} && ${_tc_ids[(Ie)$1]} )) || return 1
+  local _tc_callback=token_provider_${1}_candidates
+  (( $+functions[$_tc_callback] )) || return 1
+  shift
+  token_completion_scope || return 1
+  "$_tc_callback" "$@"
+}
+
 token_completion_offer() {
   emulate -L zsh
   (( $# == 3 && ${+_tc_context_rows} )) || return 1
@@ -632,6 +644,7 @@ _tc_complete() {
     done
     if [[ $_tc_mode == token ]] && (( ! _tc_any_scoped )); then
       for _tc_id in "${_tc_ids[@]}"; do
+        (( $+functions[token_provider_${_tc_id}_query] )) || continue
         # File providers accept an empty root or a dotted document path.
         # Third-party v1 query functions keep their flat identifier contract.
         if (( ${+_tc_file_readers[$_tc_id]} )) || [[ $_tc_query == [A-Za-z_][A-Za-z_0-9]# ]]; then
@@ -680,7 +693,10 @@ _tc_main() { _tc_complete token-completion-main "$options[interactivecomments]";
 _tc_init() {
   emulate -L zsh
   local -a _tc_ids _tc_binding
-  local _tc_map _tc_widget
+  local _tc_map _tc_widget _tc_builtin TOKEN_PROVIDER_ID
+  for _tc_builtin in "$_tc_root"/providers/*.zsh(N.); do
+    source "$_tc_builtin" || return 1
+  done
   _tc_load_files
   _tc_active_providers
   [[ -o interactive ]] || return 0

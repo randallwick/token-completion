@@ -520,6 +520,101 @@ token_provider_catalog_argument_context() {
             self.assertEqual(term.probe(), "print " + insertion)
             term.send(b"\x15")
 
+    def test_live_directory_matches(self):
+        root = self.one / "project root"
+        root.mkdir()
+        names = ["nix", "nix-config", "Space & $(literal)", "tab\tline\n", "-dash"]
+        for name in [*names, ".hidden"]:
+            (root / name).mkdir()
+        (root / "alias").symlink_to(root / "nix", target_is_directory=True)
+        (root / "dangling").symlink_to(root / "gone", target_is_directory=True)
+        (root / "file").touch()
+        (root / "nix/nested").mkdir()
+
+        def matches(fragment):
+            collect = r"""
+typeset -a _tc_ids _tc_context_rows _tc_insertions
+typeset -i _tc_scoped=0
+_tc_active_providers
+token_completion_from directory "$1" "$2" || exit 90
+(( _tc_scoped )) || exit 91
+for value in "${_tc_insertions[@]}"; do printf '%s\0' "${(Q)value}"; done
+"""
+            run = subprocess.run(
+                ["zsh", "-fc", SOURCE + collect, "zsh", fragment, str(root)],
+                env=self.env, capture_output=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            if run.stdout:
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertTrue(run.stdout.endswith(b"\0"))
+                return run.stdout[:-1].decode().split("\0")
+            return []
+
+        self.assertCountEqual(matches(""), [*names, "alias"])
+        self.assertEqual(matches("nix"), ["nix"])
+        self.assertEqual(matches("NXCF"), ["nix-config"])
+        self.assertEqual(matches("tab\tline\n"), ["tab\tline\n"])
+        (root / "nix-config").rename(root / "renamed")
+        self.assertEqual(matches("nxcf"), [])
+        self.assertEqual(matches("RNMD"), ["renamed"])
+
+    def test_directory_argument_in_zle(self):
+        name = "sp ace;$(touch injected)"
+        (self.one / name).mkdir()
+        config = self.config + """
+TOKEN_COMPLETION_PROVIDERS+=(directory)
+choose() { printf '%s' "$1" > "$HOME/selected"; }
+token_provider_catalog_argument_context() {
+  [[ $1 == literal && $3 == choose && $5 == positional && $# == 5 ]] || return 0
+  token_completion_from directory "$2" "$PWD"
+}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b"choose SPAC\t")
+        self.assertIn("sp", term.probe())
+        term.send(b"\r")
+        term.until(b"READY>")
+        self.assertEqual((self.home / "selected").read_text(), name)
+        self.assertFalse((self.one / "injected").exists())
+        term.send(b"print SPAC\t")
+        self.assertEqual(term.probe(), "print SPAC:fallback")
+
+    def test_scoped_provider_selection_and_reload(self):
+        source = self.home / "palette.zsh"
+        source.write_text("""
+TOKEN_PROVIDER_ID=palette
+typeset -g token_provider_palette_version=1
+token_provider_palette_candidates() {
+  [[ $1 == azure ]] || return 0
+  token_completion_offer "$1" palette "${(q)2}"
+}
+""")
+        check = self.zsh('TOKEN_COMPLETION_PROVIDERS=("$HOME/palette.zsh")\n' + SOURCE + """
+dispatch() {
+  local -a _tc_ids _tc_insertions _tc_context_rows
+  local -i _tc_scoped=0
+  _tc_active_providers
+  token_completion_from "$@" || return 1
+  (( _tc_scoped )) || return 1
+  print -rl -- "${_tc_insertions[@]}"
+}
+dispatch palette azure 'custom value' || exit 10
+dispatch directory "" "$PWD" && exit 11
+TOKEN_COMPLETION_PROVIDERS=(directory)
+dispatch palette azure incorrect && exit 12
+TOKEN_COMPLETION_PROVIDERS=("$HOME/palette.zsh")
+print -r -- 'TOKEN_PROVIDER_ID=palette
+typeset -g token_provider_palette_version=1
+token_provider_palette_query() { :; }' > "$HOME/palette.zsh"
+token-completion providers install >/dev/null || exit 13
+dispatch palette azure stale && exit 14
+exit 0
+""")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout.strip(), r"custom\ value")
+
     def test_native_directory_components(self):
         (self.one / "home/randall/projects").mkdir(parents=True)
         config = self.config.replace("bindkey '^I' fallback", "autoload -Uz compinit; compinit -D")

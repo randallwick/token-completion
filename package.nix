@@ -4,13 +4,14 @@ let
 in
 stdenvNoCC.mkDerivation {
   pname = "token-completion";
-  version = "0.2.0";
+  version = "0.3.0";
   src = ./.;
   dontBuild = true;
   installPhase = ''
     runHook preInstall
     dir="$out/share/token-completion"
     install -Dm644 -t "$dir" token-completion.plugin.zsh dotenv.py file_source.py providers.py
+    install -Dm644 -t "$dir/providers" providers/*.zsh
     substituteInPlace "$dir/token-completion.plugin.zsh" \
       --replace-fail '_tc_python=python3 _tc_fzf=fzf' '_tc_python=${interpreter}/bin/python3 _tc_fzf=${fzf}/bin/fzf'
     substituteInPlace "$dir/providers.py" \
