@@ -203,7 +203,7 @@ token_provider_demo_query R
     def test_update_cannot_displace_a_known_registered_provider(self):
         self.invoke("install", ENTRY)
         lock = self.lock.read_bytes()
-        for reserved in ["shell", "dotenv", "external"]:
+        for reserved in ["shell", "dotenv", "directory", "external"]:
             with self.subTest(provider=reserved):
                 self.provider.write_text(PROVIDER.replace("demo", reserved))
                 self.commit()

@@ -97,7 +97,8 @@ token_provider_my_colors_query() {
 | --- | --- | --- |
 | `TOKEN_PROVIDER_ID` | File providers | Identifier declared by the source file, using letters, digits and underscores and beginning with a letter or underscore. |
 | `token_provider_ID_version` | Yes | Set this global parameter to `1`. Replace `ID` with the identifier above. |
-| `token_provider_ID_query` | Yes | Called with the typed fragment as its first argument. Call `token_completion_emit KEY LABEL INSERTION` for each candidate. |
+| `token_provider_ID_query` | For global queries | Called with the typed fragment as its first argument. Call `token_completion_emit KEY LABEL INSERTION` for each candidate. |
+| `token_provider_ID_candidates` | For scoped sources | Receives `FRAGMENT [ARG ...]` from `token_completion_from`. Offer each selected candidate with `token_completion_offer DISPLAY SOURCE INSERTION`. |
 | `token_provider_ID_prepare` | No | Optional hook for starting inexpensive preparation when the provider becomes available. Return promptly; queries must also work cold. |
 
 Keep top-level file code limited to declaring the ID, ABI and functions. The
@@ -132,27 +133,22 @@ a flag that consumes a value from a standalone switch. Unmarked text never trigg
 widget saves the original argument span so insertion preserves an adjacent
 `--option=` and text after the cursor.
 
-For a command that takes one project directory name, register an argument
-context hook in your provider. This example accepts a bare name in the
-first argument and opens the picker on an empty argument:
+## Delegate to a scoped source
 
-```zsh
-token_provider_projects_argument_context() {
-  [[ $1 == literal && $3 == project && $5 == positional && $# == 5 ]] || return 0
-  token_completion_scope
-  token_completion_directory "$2" "${PROJECT_ROOT:-$HOME/projects}"
-}
-```
+An argument-context hook can call `token_completion_from ID FRAGMENT [ARG ...]`.
+When the ID is active for this completion and implements the candidates hook,
+the dispatcher claims the argument and forwards the fragment and arguments.
+A disabled or unavailable source returns failure without claiming the argument.
+Implement a query hook, a candidates hook, or both. A candidates-only provider
+participates when another provider selects it by ID.
 
-`token_completion_directory FRAGMENT ROOT` reads the immediate visible
-directories under the supplied root on every request. Symlinks to directories
-participate. An exact, case-sensitive basename wins, otherwise matching uses
-the same ranked, case-insensitive fuzzy filter as shell variables. The picker
-inserts the basename as one quoted shell argument and escapes control
-characters for display. The caller supplies the resolved root and owns the
-position and empty-fragment policy. Use
-`token_completion_directory_matches FRAGMENT ROOT` to read the same ordered
-basenames as NUL-delimited records from another shell function.
+The built-in `directory` source accepts one argument, a resolved directory
+path. For example, `token_completion_from directory "$fragment" "$root"`
+offers the names of its immediate visible child directories, including symlinks
+to directories. It reads the current contents on each request. An exact name
+wins, otherwise it applies the case-insensitive fuzzy filter. Selection inserts
+the basename as a single shell argument. To enable this source with an explicit
+`TOKEN_COMPLETION_PROVIDERS` list, include `directory`.
 
 Providers using the earlier option-only interface can keep
 `token_provider_<id>_context FRAGMENT COMMAND OPTION FORM [ARG ...]`.
