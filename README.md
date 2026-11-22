@@ -1,16 +1,39 @@
 # token-completion
 
-Type `$REG` in a zsh command and press **Tab**. A single match drops straight into the line. If shell variables, project-local settings, or other providers offer several matches, a compact picker opens below the command and shows who supplied each one. Type to filter. **Tab** moves down and **Shift-Tab** moves up, wrapping at either end. **Enter** inserts the highlighted match into the editable line. **Escape** restores the original line.
+**token-completion is a zsh plugin for using project settings in shell commands.**
+Suppose you’re about to deploy and the region lives in the project’s `.env`
+file. You remember the word *region*, but would normally open the file to
+check the variable name or copy its value. With token-completion, you can
+find the setting at the prompt and let the command read its value when it runs.
 
-![Below the shell command, the picker shows the same key from shell and .env, with Tab and Shift-Tab to move, Enter to insert and Escape to cancel.](docs/picker.png)
+For example, if `.env` defines `DEPLOY_REGION=us-west-2`, start typing
+`aws ec2 describe-instances --region $DEPLOY_REG` and press **Tab**. Choose
+`DEPLOY_REGION` from `[.env]` if the picker opens. Here’s the command you get:
 
-Your command stays editable. The picker displays names and sources only. Your usual completion widget still handles filenames, unsupported quoting, command positions, and tokens with no match.
+```zsh
+aws ec2 describe-instances --region "$(token-completion dotenv DEPLOY_REGION)"
+```
+
+The command is still yours to edit. When you run it, AWS receives
+`us-west-2`. If the setting changes, running the same line again reads the
+current value. Shell variables work out of the box too. If both the shell
+and the file define the same name, the picker lets you choose the source.
+
+![Inline completion picker offering DEPLOY_REGION from the shell and the project’s .env file.](docs/picker.png)
+
+A single match goes straight into the command. With several matches, type to
+filter, use **Tab** or **Shift-Tab** to move, **Enter** to insert, and **Esc**
+to cancel. Your usual completion still handles filenames. You can also
+[complete nested keys in configuration files](#complete-a-path-inside-a-document)
+or [offer choices for a particular command argument](#complete-an-argument-with-or-without-).
 
 ## Try it
 
-From a checkout, start a disposable shell and source the plugin:
+For a local demo, clone the plugin and start a disposable shell from the checkout. This example uses zsh, fzf and Python 3. [Dependency versions](#dependencies)
 
 ```zsh
+git clone https://github.com/randallwick/token-completion.git
+cd token-completion
 zsh -f
 source ./token-completion.plugin.zsh
 DEMO_REGION='North America'
@@ -49,7 +72,7 @@ immutable version tag such as `v0.2.0` to stay on one release. A Nix input
 stays at its locked revision until you update it. Contributors target
 `development`. [Contribution and release guide](CONTRIBUTING.md)
 
-Use `stable` for released changes or `development` for ongoing development. Version tags such as `v0.1.0` select a fixed release. After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
+After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
 
 ### Manual
 
