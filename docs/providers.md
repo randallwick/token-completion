@@ -107,3 +107,29 @@ was requested and can inspect the current working directory. Supply a concise
 label and an already shell-quoted insertion. For example, the colors provider
 uses zsh's `${(qqqq)color}` to quote arbitrary literal data. Separate labels and
 insertions let providers display a key while inserting a lookup expression.
+
+## Command and option context
+
+In addition to the version-1 query function, a provider can define
+`token_provider_<id>_context FRAGMENT COMMAND OPTION FORM [ARG ...]`.
+The widget calls the hook for enabled providers at `--option=$fragment` and
+`--option $fragment` positions (also short options). `FORM` is `equals` or
+`separate`. The fragment excludes the dollar sign and can be empty. Additional
+arguments are the preceding words of the active command with shell quoting
+removed, excluding the active option and redirections. The widget never
+executes substitutions to discover context.
+
+For a matching declaration call `token_completion_scope` to suppress generic
+token queries for this position. Use `token_completion_offer DISPLAY SOURCE
+INSERTION` for each already-matched candidate. The provider owns path matching;
+the shared picker handles collisions, including identical display names. A
+branch can insert a refined `$path.` for the next Tab. A leaf can insert a
+quoted deferred lookup. All insertions leave the line editable. With no
+candidates the widget delegates to the existing Tab binding. Returning from
+the hook without claiming scope leaves ordinary providers available.
+
+The context hook is additive. Existing `token_provider_<id>_query` functions
+continue to receive flat shell identifiers and use `token_completion_emit`.
+To exercise the cross-plugin PTY test, set `SHELL_OVERRIDES_TEST_PLUGIN` to
+the absolute path of the shell-overrides plugin entry point before running
+the suite, and select a PyYAML-capable `SHELL_OVERRIDES_PYTHON`.

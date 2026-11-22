@@ -144,6 +144,20 @@ Run `token-completion providers install` after loading the plugin. To advance th
 
 The built-in dotenv provider reads `.env` on completion and again when an inserted lookup executes. It accepts single-line UTF-8 assignments, optional `export`, optional spaces around `=`, and single- or double-quoted literal values. A trailing comment follows a quoted value or starts with whitespace and `#` in an unquoted value. Dollar signs and backslashes are literal. Malformed lines are skipped, and the last assignment to a key wins. A missing lookup inside ordinary quoted command substitution still passes one empty argument to the surrounding command.
 
+## Complete tokens for a command option
+
+A provider can scope `$` completion to one command and option. For example,
+[shell-overrides](https://github.com/randallwick/shell-overrides) can declare
+an INI section-name source in an `aws` manifest rule. With that rule active,
+`aws s3 ls --profile=$wo<Tab>` offers matching profile names. Selecting a name
+inserts a quoted lookup into the command. The source file, format, selection
+policy and command scope belong in the manifest.
+
+Scoped providers can also walk dotted document paths. A branch selection
+keeps a token in the buffer for another Tab; a leaf selection inserts the
+provider’s final expression. Ordinary paths such as `cd /h/r/p<Tab>` go to
+the existing zsh completion widget. [Contextual provider interface](docs/providers.md#command-and-option-context)
+
 ## Write a provider
 
 Save this as `colors.zsh`, then add its absolute path to `TOKEN_COMPLETION_PROVIDERS`. The same functions can be exported by an existing zsh plugin; a user can select that provider by its ID.
