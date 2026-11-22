@@ -27,9 +27,19 @@ print -r -- 'DEMO_REGION="South Pacific"' > .env
 
 Complete `print -r -- $DEMO_REG` again and pick `[.env]`. The editable result is `print -r -- "$(token-completion dotenv DEMO_REGION)"`. A history replay reads the `.env` file in the directory where the replay runs.
 
-## Installation and updates
+## Dependencies
 
-Source installations need zsh, fzf with NUL input/output and border-label support, and Python 3.10+ with its standard library. Git is used for installation and for explicitly installing or updating GitHub providers. The Nix package supplies its runtime tools.
+For a source installation, put the commands you need on `PATH`. The Nix package supplies the helper executables. The table gives the lowest versions verified on Linux for each role.
+
+| Dependency | Minimum verified version | When you need it |
+| --- | --- | --- |
+| zsh | 5.9 | The Tab widget runs in interactive zsh with ZLE enabled. |
+| fzf | 0.52.1 | Filters NUL-delimited candidates and displays the picker when several match. |
+| Python 3 | 3.10.15 (3.10 series) | Reads dotenv keys and values, manages provider pins, and verifies cached GitHub providers. The standard library is sufficient. |
+| Git | 2.44.1 | Clones a source installation and fetches GitHub providers during explicit install or update. Completion from a verified cache works offline. |
+| Python 3 for tests | 3.11.9 (3.11 series) | The terminal tests use `termios.tcsetwinsize` to size a disposable PTY. |
+
+## Installation and updates
 
 Use `stable` for released changes or `development` for ongoing development. Version tags such as `v0.1.0` select a fixed release. After an update, open a fresh interactive shell and run `token-completion providers list` to verify loading.
 
@@ -101,6 +111,7 @@ Set shell variables before sourcing the plugin in `.zshrc`. The provider array i
 | `TOKEN_COMPLETION_PROVIDERS` | Ordered array of provider IDs, absolute local provider files or GitHub references | Shell, dotenv and compatible providers defined in the shell. An explicitly empty array disables all providers. |
 | `TOKEN_COMPLETION_CONFIG_DIR` | Directory containing `providers.lock` | `${XDG_CONFIG_HOME:-$HOME/.config}/token-completion` |
 | `XDG_CACHE_HOME` | Base directory for downloaded provider checkouts | `$HOME/.cache`; the plugin uses the `token-completion` subdirectory |
+| `TOKEN_COMPLETION_PROMPT` | Literal picker prompt, read each time the picker opens. Set to an empty string to hide it. | `› ` (chevron and space) |
 | `NO_COLOR` | Set to a nonempty string to disable decorative color | Use the terminal theme with an accent on the prompt and selection. Piped CLI output is plain. |
 
 **Use just the project-local source.** Put `TOKEN_COMPLETION_PROVIDERS=(dotenv)` before loading the plugin. An installed plugin that exports a compatible named provider can join the array by ID, in either load order. Its own settings and data remain with that plugin.
@@ -132,6 +143,20 @@ Run `token-completion providers install` after loading the plugin. To advance th
 ### Dotenv grammar
 
 The built-in dotenv provider reads `.env` on completion and again when an inserted lookup executes. It accepts single-line UTF-8 assignments, optional `export`, optional spaces around `=`, and single- or double-quoted literal values. A trailing comment follows a quoted value or starts with whitespace and `#` in an unquoted value. Dollar signs and backslashes are literal. Malformed lines are skipped, and the last assignment to a key wins. A missing lookup inside ordinary quoted command substitution still passes one empty argument to the surrounding command.
+
+## Complete tokens for a command option
+
+A provider can scope `$` completion to one command and option. For example,
+[shell-overrides](https://github.com/randallwick/shell-overrides) can declare
+an INI section-name source in an `aws` manifest rule. With that rule active,
+`aws s3 ls --profile=$wo<Tab>` offers matching profile names. Selecting a name
+inserts a quoted lookup into the command. The source file, format, selection
+policy and command scope belong in the manifest.
+
+Scoped providers can also walk dotted document paths. A branch selection
+keeps a token in the buffer for another Tab; a leaf selection inserts the
+provider’s final expression. Ordinary paths such as `cd /h/r/p<Tab>` go to
+the existing zsh completion widget. [Contextual provider interface](docs/providers.md#command-and-option-context)
 
 ## Write a provider
 

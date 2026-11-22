@@ -94,6 +94,7 @@ zle -N fallback
 bindkey '^I' fallback
 LAB_ENV='secret shell value'
 SOLO_SHELL='value with spaces'
+TOKEN_COMPLETION_PROMPT='Look up › '
 TOKEN_COMPLETION_PROVIDERS=(shell dotenv "$HOME/catalog.zsh")
 """ + SOURCE + """
 HISTFILE=$HOME/history
@@ -187,6 +188,108 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         (self.one/".env").unlink()
         self.assertIn(".env lookup", self.zsh(SOURCE+"\ntoken-completion dotenv FIELD").stderr)
 
+    def test_scoped_context_in_zle(self):
+        # A provider supplies a branch insertion on one Tab, a leaf on the next.
+        config = self.config + """
+token_provider_catalog_context() {
+  local fragment=$1 cmd=$2 opt=$3 form=$4
+  shift 4
+  [[ $cmd == deploy && $opt == --value && $1 == get ]] || return 0
+  token_completion_scope
+  case $fragment in
+    '') token_completion_offer region cfg '$region.' ;;
+    region.) token_completion_offer region.zone cfg "'west'" ;;
+  esac
+}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        for prefix in ("echo ignored | deploy get --value=", "deploy get --value ",
+                       "echo ignored &! deploy get --value=", "deploy >|out get --value=",
+                       "deploy 2>>!out get --value=", "deploy &>>|out get --value="):
+            term.send((prefix + "$").encode() + b"\t")
+            self.assertEqual(term.probe(), prefix + "$region.")
+            term.send(b"\t")
+            self.assertEqual(term.probe(), prefix + "'west'")
+            term.send(b"\x15")
+        for prefix in ("deploy get -- --value=", "deploy get | echo --value=", "deploy other --value ",
+                       "deploy get &! echo --value=", "deploy get &| echo --value=",
+                       "deploy {fd}>out get --value=", "deploy get 2<<EOF --value="):
+            term.send((prefix + "$region.").encode() + b"\t")
+            self.assertEqual(term.probe(), prefix + "$region.:fallback")
+            term.send(b"\x15")
+
+    @unittest.skipUnless(os.environ.get("SHELL_OVERRIDES_TEST_PLUGIN"), "set SHELL_OVERRIDES_TEST_PLUGIN for integration")
+    def test_manifest_source_in_zle(self):
+        manifests = self.home / "manifests"
+        manifests.mkdir()
+        (manifests / "cli.yaml").write_text("""version: 1
+commands:
+  probe:
+    - prefix: []
+      completions:
+        - option: --profile
+          source: {file: ./credentials, format: ini, select: section-names}
+        - option: --value
+          source: {file: ./settings.json, format: json, select: leaf-values}
+""")
+        exe = self.home / "probe"
+        exe.write_text("#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        exe.chmod(0o700)
+        for directory, value in [(self.one, "first value"), (self.two, "second value")]:
+            (directory / "settings.json").write_text('{"deploy":{"us.east":"' + value + '"}}')
+            (directory / "credentials").write_text("[work-read-dev]\nsecret = NEVER_DISPLAY\n[work-read-stage]\nsecret = NEVER_DISPLAY\n")
+        config = self.config + f"""
+path=("$HOME" $path)
+SHELL_OVERRIDES_MANIFEST_DIR="$HOME/manifests"
+TOKEN_COMPLETION_PROVIDERS=(shell_overrides)
+source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b'probe --profile=$wo\t')
+        menu = term.until(b'work-read-stage')
+        self.assertNotIn(b'NEVER_DISPLAY', menu)
+        term.send(b'stage')
+        term.until(b'1/')
+        term.send(b'\r')
+        term.until(b'\x1b[?1049l')
+        self.assertIn("lookup", term.probe())
+        term.send(b'\r')
+        term.until(b'<--profile=work-read-stage>')
+        term.until(b'READY>')
+        term.send(b'probe --value $dep.us\t')
+        saved = term.probe()
+        self.assertIn('deploy.us%2Eeast', saved)
+        term.send(b'\r')
+        term.until(b'<first value>')
+        term.until(b'READY>')
+        term.send(f'cd ../two; {saved}\r'.encode())
+        term.until(b'<second value>')
+
+    def test_native_directory_components(self):
+        (self.one / "home/randall/projects").mkdir(parents=True)
+        config = self.config.replace("bindkey '^I' fallback", "autoload -Uz compinit; compinit -D")
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        term.send(b'cd h/r/p\t')
+        self.assertEqual(term.probe().rstrip("/ "), "cd home/randall/projects")
+
+    def test_picker_options(self):
+        capture = self.home / "capture-fzf"
+        capture.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+        capture.chmod(0o755)
+        for value in (None, "", "Filter $tokens > "):
+            with self.subTest(value=value):
+                setting = ("unset TOKEN_COMPLETION_PROMPT" if value is None
+                           else "TOKEN_COMPLETION_PROMPT=" + shlex.quote(value))
+                run = self.zsh(SOURCE + "\n" + setting + '\n_tc_fzf="$HOME/capture-fzf"\n_tc_pick')
+                self.assertEqual(run.returncode, 0, run.stderr)
+                args = run.stdout.splitlines()
+                self.assertIn("--prompt=" + ("› " if value is None else value), args)
+                self.assertIn("--no-border", args)
+                self.assertFalse(any(arg.startswith("--border-label") for arg in args))
+
     def test_zle(self):
         term = Terminal(self.home, self.config, self.env, self.one)
         self.addCleanup(term.close)
@@ -203,7 +306,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.send(b'!')
         self.assertEqual(term.probe(), 'print --flag="$SOLO_SHELL"! tail')
         term.send(b'\x05\x15printf $LAB_EN\t')
-        screen = term.until(b'token ')
+        screen = term.until(b'Look up ')
         screen += term.until(b'Enter  insert')
         if b'[catalog]' not in screen:
             screen += term.until(b'[catalog]')
@@ -212,7 +315,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.until(b"\x1b[?1049l")
         self.assertEqual(term.probe(), "printf $LAB_EN")
         term.send(b'\t')
-        term.until(b'token ')
+        term.until(b'Look up ')
         term.send(b'.env')
         term.until(b'1/')
         term.send(b'\r')
@@ -227,7 +330,7 @@ print -rl -- "${_tc_ids[@]}" "${_tc_insertions[@]}"
         term.until(b'secret two')
         term.until(b'READY>')
         term.send(b'print $TWINS\t')
-        term.until(b'token ')
+        term.until(b'Look up ')
         term.send(b'\x1b[B\r')
         term.until(b"\x1b[?1049l")
         self.assertEqual(term.probe(), 'print second')
