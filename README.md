@@ -1,8 +1,8 @@
 # token-completion
 
-Type `$REG` in a zsh command and press **Tab**. A single match drops straight into the line. If shell variables, project-local settings, or other providers offer several matches, the picker shows who supplied each one. Type to filter. **Tab** moves down and **Shift-Tab** moves up, wrapping at either end. **Enter** inserts the highlighted match into the editable line. **Escape** restores the original line.
+Type `$REG` in a zsh command and press **Tab**. A single match drops straight into the line. If shell variables, project-local settings, or other providers offer several matches, a compact picker opens below the command and shows who supplied each one. Type to filter. **Tab** moves down and **Shift-Tab** moves up, wrapping at either end. **Enter** inserts the highlighted match into the editable line. **Escape** restores the original line.
 
-![The picker shows the same key from shell and .env, with Tab and Shift-Tab to move, Enter to insert and Escape to cancel.](docs/picker.png)
+![Below the shell command, the picker shows the same key from shell and .env, with Tab and Shift-Tab to move, Enter to insert and Escape to cancel.](docs/picker.png)
 
 Your command stays editable. The picker displays names and sources only. Your usual completion widget still handles filenames, unsupported quoting, command positions, and tokens with no match.
 
@@ -220,8 +220,18 @@ for that option, these interactions have different effects:
 | Type, then press Tab | What choosing `work-read-dev` puts in the command |
 | --- | --- |
 | `aws --profile wo` or `aws --profile=wo` | The literal profile name, quoted as one argument. History keeps the selected name. |
-| `aws --profile $wo` or `aws --profile=$wo` | A guarded lookup that reads the credentials file’s section names when the command runs or replays. |
+| `aws --profile $wo` or `aws --profile=$wo` | A quoted lookup that reads the section name when the command runs or replays. |
 | `aws --profile ` or `aws --profile=` | The manifest can offer all profile names here or delegate the empty value to native completion. |
+
+The default deferred insertion uses ordinary zsh command substitution:
+
+```zsh
+aws --profile "$(token-completion lookup ini section-names \~/.aws/credentials work-read-dev)"
+```
+
+The manifest chooses what to offer on Tab. The saved command reads the recorded
+file and key, including after a manifest edit. Zsh trims trailing newlines.
+Providers can opt into a replay guard, exact newline capture, or both.
 
 The picker displays document paths or names and their sources. Selecting a
 literal leaf puts its value into the editable line and shell history. For

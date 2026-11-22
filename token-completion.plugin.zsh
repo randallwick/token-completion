@@ -106,6 +106,13 @@ _tc_file_candidates() {
   emulate -L zsh
   local _tc_mode=$1
   shift
+  local -i _tc_exact=0
+  # A document fragment can itself be "--exact". The third argument in
+  # the original call is a selection policy; with the flag it is a format.
+  if [[ $_tc_mode == deferred && $1 == --exact && $3 != (keys|leaf-values|section-names) ]]; then
+    _tc_exact=1
+    shift
+  fi
   (( $# == 4 || $# == 7 || $# == 8 )) || return 2
   [[ $_tc_mode != literal ]] || (( ${+_tc_literal_fields} )) || return 1
   local _tc_fragment_text=$1 _tc_format=$2 _tc_selection=$3 _tc_file=$4
@@ -145,8 +152,11 @@ _tc_file_candidates() {
         _tc_literal_fields[${#_tc_insertions}]=${(pj:\0:)_tc_lookup}
         continue
       fi
-      # The sentinel preserves trailing newlines through command substitution.
-      _tc_insertion='"${$(token-completion lookup '"${(j: :)${(@q)_tc_lookup}}"' && builtin print -rn -- .)%.}"'
+      if (( _tc_exact )); then
+        _tc_insertion='"${$(token-completion lookup-exact '"${(j: :)${(@q)_tc_lookup}}"')%.}"'
+      else
+        _tc_insertion='"$(token-completion lookup '"${(j: :)${(@q)_tc_lookup}}"')"'
+      fi
     fi
     token_completion_offer "$_tc_display" "$_tc_file" "$_tc_insertion"
   done < <(command "$_tc_python" "$_tc_root/file_source.py" list "$_tc_format" "$_tc_selection" "$_tc_file" "$_tc_fragment_text")
@@ -160,7 +170,7 @@ _tc_accept_insertion() {
   fi
   local -a _tc_lookup=("${(@0)_tc_literal_fields[$1]}")
   local _tc_value
-  _tc_value=$(token-completion lookup "${_tc_lookup[@]}" && builtin print -rn -- .) || return $?
+  _tc_value=$(token-completion lookup-exact "${_tc_lookup[@]}") || return $?
   _tc_value=${_tc_value%.}
   _tc_insertion=${(q)_tc_value}
 }
@@ -428,8 +438,9 @@ _tc_help() {
   print -r -- '    --file FILE        Long form of -f'
   print -r -- '    --format FORMAT    Use this enabled parser for the next file'
   print -r -- '    --json FILE        Shorthand for --format json -f FILE (also ini, toml, yaml)'
-  print -r -- '  lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION]'
+  print -r -- '  lookup FORMAT SELECT FILE PATH [GUARD COMMAND OPTION [DECLARED_FORMAT]]'
   print -r -- '                       Read one document key or leaf at execution time'
+  print -r -- '  lookup-exact …       Append a dot to successful output to preserve final newlines in zsh'
   print -r -- '  dotenv KEY           Read a literal from .env in this directory'
 }
 
@@ -439,6 +450,7 @@ token-completion() {
     ::0|help::1|--help::1|-h::1) _tc_help ;;
     files:*) shift; _tc_add_files "$@" ;;
     lookup:*) shift; _tc_document_lookup "$@" ;;
+    lookup-exact:*) shift; _tc_document_lookup "$@" && builtin print -rn -- . ;;
     dotenv:*:2) command "$_tc_python" "$_tc_root/dotenv.py" get "$2" ;;
     providers:(list|install|update):2)
       local -a _tc_entries _tc_ids
@@ -537,6 +549,13 @@ _tc_fragment() {
 
 _tc_pick() {
   emulate -L zsh
+  # Reserve room for the command and recent output, even in a split pane.
+  local -i _tc_lines_available=${LINES:-24} _tc_height=10
+  (( _tc_lines_available > 0 && _tc_lines_available < 20 )) && _tc_height=$(( (_tc_lines_available + 1) / 2 ))
+  local -a _tc_guide=(--header='Tab/Shift-Tab  move     Enter  insert     Esc  cancel')
+  if (( _tc_height < 5 )); then
+    _tc_guide=(--info=hidden --no-separator)
+  fi
   local _tc_default_prompt='› '
   local -a _tc_style=(--ansi --color=pointer:cyan,prompt:cyan,hl:yellow,hl+:yellow)
   local _tc_dim=$'\e[2m' _tc_reset=$'\e[0m'
@@ -559,10 +578,10 @@ _tc_pick() {
   done
   # Do not inherit user accept/execute/preview bindings in an insertion widget.
   printf '%s\0' "${_tc_lines[@]}" | FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' command "$_tc_fzf" \
-    --read0 --print0 --delimiter=$'\t' --with-nth=2.. --no-multi --layout=reverse --no-border \
+    --read0 --print0 --delimiter=$'\t' --with-nth=2.. --no-multi --height="~$_tc_height" --layout=reverse --no-border \
     --prompt="${TOKEN_COMPLETION_PROMPT-$_tc_default_prompt}" --pointer='▸' \
     --bind=tab:down,btab:up --cycle \
-    --header='Tab/Shift-Tab  move     Enter  insert     Esc  cancel' "${_tc_style[@]}"
+    "${_tc_guide[@]}" "${_tc_style[@]}"
 }
 
 # A contextual provider already matched each component. Keep its display row
@@ -630,7 +649,19 @@ _tc_complete() {
   case $#_tc_matches in
     0) zle "${_tc_fallbacks[$1]}"; return ;;
     1) _tc_row=$_tc_matches[1] ;;
-    *) _tc_filter_result=$(_tc_pick "${_tc_matches[@]}") || { zle -R; return; }
+    *) # Anchor the picker below the entire command when text beyond the
+       # editing cursor wraps onto later rows.
+       local -i _tc_saved_cursor=$CURSOR
+       CURSOR=${#BUFFER}
+       zle -R
+       _tc_filter_result=$(_tc_pick "${_tc_matches[@]}")
+       local -i _tc_pick_status=$?
+       # fzf cleared its rows. Repaint from its anchor before moving the
+       # editor back to the completion position.
+       zle redisplay
+       CURSOR=$_tc_saved_cursor
+       zle -R
+       (( _tc_pick_status == 0 )) || return 0
        _tc_row=${_tc_filter_result%$'\0'} ;;
   esac
   _tc_id=${_tc_row%%$'\t'*}

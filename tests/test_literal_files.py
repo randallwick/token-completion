@@ -74,6 +74,67 @@ done
         self.assertIn("token-completion lookup", deferred)
         self.assertNotIn("private", deferred)
 
+    def test_deferred_replay_matrix(self):
+        document = self.home / "config.json"
+        for exact in (False, True):
+            for guarded in (False, True):
+                with self.subTest(exact=exact, guarded=guarded):
+                    document.write_text(json.dumps({"zone": "secret initial\n\n"}))
+                    self.guard_log.unlink(missing_ok=True)
+                    flag = "--exact " if exact else ""
+                    guard = " permit deploy --opt auto" if guarded else ""
+                    args = "json leaf-values ./config.json zone" + guard
+                    expected = ('"${$(token-completion lookup-exact ' + args + ')%.}"' if exact
+                                else '"$(token-completion lookup ' + args + ')"')
+                    generated = self.run_zsh(
+                        f"token_completion_file {flag}zo json leaf-values ./config.json{guard}\n"
+                        "_tc_accept_insertion 1 && print -rn -- \"$_tc_insertion\""
+                    )
+                    self.assertEqual(generated.returncode, 0, generated.stderr)
+                    self.assertEqual(generated.stdout.decode(), expected)
+                    self.assertFalse(self.guard_log.exists())
+                    value = "replayed $(false) .\n\n"
+                    document.write_text(json.dumps({"zone": value}))
+                    replay = self.run_zsh(f"set -- {expected}\n(( $# == 1 )) && print -rn -- \"$1\"")
+                    self.assertEqual(replay.returncode, 0, replay.stderr)
+                    self.assertEqual(replay.stdout.decode(), value if exact else value.rstrip("\n"))
+                    self.assertEqual(self.guard_log.exists(), guarded)
+                    if guarded:
+                        (self.home / "allow").unlink()
+                        revoked = self.run_zsh(f"set -- {expected}\nprint -rn -- \"$1\"")
+                        self.assertEqual(revoked.stdout, b"")
+                        self.assertIn(b"no longer authorized", revoked.stderr)
+                        (self.home / "allow").touch()
+
+    def test_exact_flag_can_also_be_the_fragment(self):
+        self.doc.write_text(json.dumps({"--exact": "match"}))
+        result = self.run_zsh(r"""
+token_completion_file --exact json keys "$DOC" permit deploy --opt auto
+token_completion_file --exact --exact json keys "$DOC"
+for i in 1 2; do
+  _tc_accept_insertion $i || exit 10
+  eval "set -- $_tc_insertion"
+  print -r -- "$1"
+done
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [b"--exact", b"--exact"])
+
+    def test_lookup_output_and_old_guarded_history(self):
+        self.doc.write_text(json.dumps({"zone": "west.\n\n"}))
+        for verb, output in (("lookup", b"west.\n\n"), ("lookup-exact", b"west.\n\n.")):
+            with self.subTest(verb=verb):
+                ok = self.run_zsh(f'token-completion {verb} json leaf-values "$DOC" zone')
+                self.assertEqual((ok.returncode, ok.stdout), (0, output), ok.stderr)
+                missing = self.run_zsh(f'token-completion {verb} json leaf-values "$DOC" gone')
+                self.assertNotEqual(missing.returncode, 0)
+                self.assertEqual(missing.stdout, b"")
+
+        history = self.run_zsh(r"""
+print -rn -- "${$(token-completion lookup json leaf-values "$DOC" zone permit deploy --opt && builtin print -rn -- .)%.}"
+""")
+        self.assertEqual((history.returncode, history.stdout), (0, b"west.\n\n"), history.stderr)
+
     def test_bare_branch_starting_with_dash_can_be_completed_again(self):
         self.doc.write_text('{"-profiles":{"work":"west"},"%2Dprofiles":{"work":"other"}}')
         result = self.run_zsh(r"""
@@ -173,14 +234,14 @@ PS1='READY> '
             term.send(b'regionB')
             term.until(b'1/')
             term.send(b'\r')
-            term.until(b'\x1b[?1049l')
+            term.picker_closed()
 
         original = "runjob --pick=reg"
         term.send(original.encode())
         picker()
         self.assertFalse(self.guard_log.exists())
         term.send(b'\x1b')
-        term.until(b'\x1b[?1049l')
+        term.picker_closed()
         self.assertEqual(term.probe(), original)
         self.assertFalse(self.guard_log.exists())
 

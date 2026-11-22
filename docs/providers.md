@@ -152,13 +152,12 @@ the hook without claiming scope leaves ordinary providers available.
 
 ### Delegate to a document provider
 
-Choose the helper that matches the requested insertion. Both take the same
-arguments and show the same names and provenance in the picker.
+Choose the helper that matches the requested insertion. Both show the same names and provenance in the picker.
 
 | Helper | What happens on selection |
 | --- | --- |
 | `token_completion_file_literal` | Resolve the chosen leaf, run its guard if present, and quote the result as a single shell word. History stores the literal. |
-| `token_completion_file` | Insert a guarded lookup expression. History replay resolves the current value. |
+| `token_completion_file` | Insert a quoted lookup expression. Replay reads the recorded path, and zsh trims trailing newlines. |
 
 Both helpers allow another Tab to descend from a selected container. The
 literal helper inserts a bare path prefix and the deferred helper keeps its
@@ -167,7 +166,7 @@ literal helper inserts a bare path prefix and the deferred helper keeps its
 For example, a deferred source uses the following signature.
 
 ```zsh
-token_completion_file "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION [DECLARED_FORMAT]]
+token_completion_file [--exact] "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION [DECLARED_FORMAT]]
 ```
 
 The shared loader implements the four built-in file formats. A third-party
@@ -191,14 +190,25 @@ calls `token_completion_scope` first.
 INI option names preserve case; interpolation is disabled. JSON and YAML use
 their parsers’ supported encodings, INI accepts UTF-8 with an optional BOM,
 and TOML uses UTF-8. Supported map keys are nonempty strings without NUL.
-Strings retain whitespace at execution, including trailing newlines. Boolean
+Direct `lookup` output preserves all whitespace. Zsh removes trailing newlines
+from a value captured by ordinary command substitution. Boolean
 and null leaves use JSON spellings; date and time values use ISO format.
 Lookups diagnose unsupported scalars or missing paths without printing source
 values. Provider code can reuse this helper with explicitly configured files
 even if that format's standalone file array is empty.
 
-For rules that can change, pass a zsh function name as `GUARD` and include
-the command and option. The generated expression invokes:
+By default, a deferred file completion inserts a command such as
+`"$(token-completion lookup json leaf-values ./settings.json region)"`.
+Two opt-ins change its behavior independently:
+
+- Supply the leading `--exact` argument to preserve trailing newlines in the
+  command argument. The generated expression uses `lookup-exact`, which adds a
+  final dot on success so zsh can strip the dot after capturing the value.
+- Supply a zsh function as `GUARD` with its command and option to check the
+  live declaration before each lookup. Previously generated guarded lookups
+  continue to call their guard.
+
+With a guard, the underlying lookup takes these arguments:
 
 ```text
 token-completion lookup FORMAT SELECT FILE PATH GUARD CMD OPTION [DECLARED_FORMAT]

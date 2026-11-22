@@ -47,10 +47,19 @@ class Terminal:
             timeout = end - time.monotonic()
             if timeout <= 0 or not select.select([self.fd], [], [], timeout)[0]:
                 raise AssertionError(f"missing {needle!r} in {self.pending[-1200:]!r}")
-            self.pending += os.read(self.fd, 65536)
+            packet = os.read(self.fd, 65536)
+            # Inline fzf requests a cursor position before painting. This PTY
+            # models a prompt on row six, away from either screen edge.
+            for _ in range(packet.count(b"\x1b[6n")):
+                self.send(b"\x1b[6;20R")
+            self.pending += packet
         index = self.pending.index(needle) + len(needle)
         observed, self.pending = self.pending[:index], self.pending[index:]
         return observed
+
+    def picker_closed(self):
+        # Both supported fzf versions relinquish mouse reporting on close.
+        return self.until(b"\x1b[?1000l")
 
     def probe(self):
         path = self.home / "buffer"
@@ -407,7 +416,7 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
                 term.send(b"stage")
                 term.until(b"1/")
                 term.send(b"\r")
-                term.until(b"\x1b[?1049l")
+                term.picker_closed()
                 self.assertNotIn("lookup", term.probe())
                 term.send(b"\r")
                 term.until(b"work-read-stage>")
@@ -438,7 +447,7 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
         term.send(b'stage')
         term.until(b'1/')
         term.send(b'\r')
-        term.until(b'\x1b[?1049l')
+        term.picker_closed()
         self.assertIn("lookup", term.probe())
         term.send(b'\r')
         term.until(b'<--profile=work-read-stage>')
@@ -504,9 +513,10 @@ token_provider_catalog_argument_context() {
         self.addCleanup(term.close)
         for keys, insertion in ((b"\x1b[Z", "second"), (b"\t\t", "first")):
             term.send(b"print $TWINS\t")
-            term.until(b"Enter  insert")
+            opened = term.until(b"Enter  insert")
+            self.assertNotIn(b"\x1b[?1049h", opened)
             term.send(keys + b"\r")
-            term.until(b"\x1b[?1049l")
+            term.picker_closed()
             self.assertEqual(term.probe(), "print " + insertion)
             term.send(b"\x15")
 
@@ -517,6 +527,22 @@ token_provider_catalog_argument_context() {
         self.addCleanup(term.close)
         term.send(b'cd h/r/p\t')
         self.assertEqual(term.probe().rstrip("/ "), "cd home/randall/projects")
+
+    def test_picker_preserves_wrapped_right_buffer_and_cursor(self):
+        term = Terminal(self.home, self.config, self.env, self.one)
+        self.addCleanup(term.close)
+        tail = b" " + b"x" * 150
+        term.send(b"print $TWINS" + tail + b"\x1b[D" * len(tail) + b"\t")
+        term.until(b"Enter  insert")
+        term.send(b"\x1b")
+        term.picker_closed()
+        self.assertEqual(term.probe(), "print $TWINS" + tail.decode())
+        term.send(b"\t")
+        term.until(b"Enter  insert")
+        term.send(b"\x1b[Z\r")
+        term.picker_closed()
+        term.send(b"!")
+        self.assertEqual(term.probe(), "print second!" + tail.decode())
 
     def test_picker_options(self):
         capture = self.home / "capture-fzf"
@@ -531,7 +557,11 @@ token_provider_catalog_argument_context() {
                 args = run.stdout.splitlines()
                 self.assertIn("--prompt=" + ("› " if value is None else value), args)
                 self.assertIn("--no-border", args)
+                self.assertIn("--height=~10", args)
                 self.assertFalse(any(arg.startswith("--border-label") for arg in args))
+        short = self.zsh(SOURCE + '\nLINES=6; _tc_fzf="$HOME/capture-fzf"; _tc_pick')
+        self.assertIn("--height=~3", short.stdout.splitlines())
+        self.assertIn("--info=hidden", short.stdout.splitlines())
 
     def test_zle(self):
         term = Terminal(self.home, self.config, self.env, self.one)
@@ -555,14 +585,14 @@ token_provider_catalog_argument_context() {
             screen += term.until(b'[catalog]')
         self.assertNotIn(b'secret one', screen)
         term.send(b"\x1b")
-        term.until(b"\x1b[?1049l")
+        term.picker_closed()
         self.assertEqual(term.probe(), "printf $LAB_EN")
         term.send(b'\t')
         term.until(b'Look up ')
         term.send(b'.env')
         term.until(b'1/')
         term.send(b'\r')
-        term.until(b'\x1b[?1049l')
+        term.picker_closed()
         line = term.probe()
         self.assertEqual(line, 'printf "$(token-completion dotenv LAB_ENV)"')
         term.send(b'\r')
@@ -575,7 +605,7 @@ token_provider_catalog_argument_context() {
         term.send(b'print $TWINS\t')
         term.until(b'Look up ')
         term.send(b'\x1b[B\r')
-        term.until(b"\x1b[?1049l")
+        term.picker_closed()
         self.assertEqual(term.probe(), 'print second')
 
     def test_keymaps_and_resourcing(self):
