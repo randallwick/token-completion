@@ -374,7 +374,14 @@ commands:
     - prefix: []
       completions:
         - option: --profile
+          markerless: {empty: all}
           source: {file: ./credentials, select: section-names}
+        - option: --account
+          markerless: {empty: native}
+          source: {file: ./credentials, select: section-names}
+        - position: 1
+          markerless: {empty: native}
+          source: {file: ./settings.json, select: leaf-values}
         - option: --value
           source: {file: ./settings.json, select: leaf-values}
 """)
@@ -392,6 +399,39 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
 """
         term = Terminal(self.home, config, self.env, self.one)
         self.addCleanup(term.close)
+        for prefix in ("probe --profile ", "probe --profile="):
+            for query in ("", "wo"):
+                term.send((prefix + query).encode() + b"\t")
+                menu = term.until(b"work-read-stage")
+                self.assertNotIn(b"NEVER_DISPLAY", menu)
+                term.send(b"stage")
+                term.until(b"1/")
+                term.send(b"\r")
+                term.until(b"\x1b[?1049l")
+                self.assertNotIn("lookup", term.probe())
+                term.send(b"\r")
+                term.until(b"work-read-stage>")
+                term.until(b"READY>")
+
+        # An unclaimed bare argument and the positional declaration's native
+        # empty policy both delegate to the saved widget. Dollar tokens still
+        # reach the existing guarded provider.
+        for line in ("probe ", "probe --account ", "probe --account=", "probe other dep", "echo --profile=wo"):
+            term.send(line.encode() + b"\t")
+            self.assertEqual(term.probe(), line + ":fallback")
+            term.send(b"\x15")
+
+        term.send(b"probe dep.us\t")
+        literal = term.probe()
+        self.assertNotIn("lookup", literal)
+        term.send(b"\r")
+        term.until(b"<first value>")
+        term.until(b"READY>")
+        term.send(f"cd ../two; {literal}\r".encode())
+        term.until(b"<first value>")
+        term.until(b"READY>")
+        term.send(b"cd ../one\r")
+        term.until(b"READY>")
         term.send(b'probe --profile=$wo\t')
         menu = term.until(b'work-read-stage')
         self.assertNotIn(b'NEVER_DISPLAY', menu)
@@ -411,6 +451,64 @@ source {shlex.quote(os.environ["SHELL_OVERRIDES_TEST_PLUGIN"])}
         term.until(b'READY>')
         term.send(f'cd ../two; {saved}\r'.encode())
         term.until(b'<second value>')
+
+    def test_argument_context_in_zle(self):
+        config = self.config + """
+token_provider_catalog_context() { token_completion_offer legacy source WRONG; }
+token_provider_catalog_argument_context() {
+  local mode=$1 fragment=$2 cmd=$3 opt=$4 form=$5
+  shift 5
+  [[ $cmd == deploy ]] || return
+  case "$form:$opt" in
+    equals:--region|separate:--region) token_completion_scope ;;
+    positional:) [[ $# == 0 || $1 == --verbose || $1 == -- ]] || return; token_completion_scope ;;
+    *) return ;;
+  esac
+  [[ $fragment == (east|''|--east|élément:un/deux) ]] || return
+  token_completion_offer zone file "${mode}_zone"
+}
+"""
+        term = Terminal(self.home, config, self.env, self.one)
+        self.addCleanup(term.close)
+        for typed, expected in (
+            ("deploy --region=", "deploy --region=literal_zone"),
+            ("deploy --region --east", "deploy --region literal_zone"),
+            ("deploy --verbose --east", "deploy --verbose --east:fallback"),
+            ("deploy élément:un/deux", "deploy literal_zone"),
+            ("deploy --region east", "deploy --region literal_zone"),
+            ("deploy --region ", "deploy --region literal_zone"),
+            ("deploy east", "deploy literal_zone"),
+            ("deploy -- --east", "deploy -- literal_zone"),
+            ("deploy --verbose east", "deploy --verbose literal_zone"),
+            ("deploy ", "deploy literal_zone"),
+            ("deploy $east", "deploy token_zone"),
+            ("deploy --region=$east", "deploy --region=token_zone"),
+            ("deploy --region=W", "deploy --region=W:fallback"),
+            ("deploy --reg", "deploy --reg:fallback"),
+            ("deploy OTHER", "deploy OTHER:fallback"),
+            ("deploy >east", "deploy >east:fallback"),
+            ("deploy # ", "deploy # :fallback"),
+            ("deploy \'east", "deploy \'east:fallback"),
+            ("echo SOLO_SHE", "echo SOLO_SHE:fallback"),
+            ("echo --unknown=$NO_MATCH_ZZZ", "echo --unknown=$NO_MATCH_ZZZ:fallback"),
+        ):
+            with self.subTest(typed=typed):
+                term.send(typed.encode() + b"\t")
+                self.assertEqual(term.probe(), expected)
+                term.send(b"\x15")
+        term.send(b"deploy east tail" + b"\x1b[D" * 5 + b"\t")
+        self.assertEqual(term.probe(), "deploy literal_zone tail")
+
+    def test_picker_tab_and_backtab_cycle(self):
+        term = Terminal(self.home, self.config, self.env, self.one)
+        self.addCleanup(term.close)
+        for keys, insertion in ((b"\x1b[Z", "second"), (b"\t\t", "first")):
+            term.send(b"print $TWINS\t")
+            term.until(b"Enter  insert")
+            term.send(keys + b"\r")
+            term.until(b"\x1b[?1049l")
+            self.assertEqual(term.probe(), "print " + insertion)
+            term.send(b"\x15")
 
     def test_native_directory_components(self):
         (self.one / "home/randall/projects").mkdir(parents=True)

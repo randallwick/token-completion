@@ -1,8 +1,8 @@
 # token-completion
 
-Type `$REG` in a zsh command and press **Tab**. A single match drops straight into the line. If shell variables, project-local settings, or other providers offer several matches, the picker shows who supplied each one. Type to narrow the list, press **Enter** to insert, or **Escape** to return to your original line.
+Type `$REG` in a zsh command and press **Tab**. A single match drops straight into the line. If shell variables, project-local settings, or other providers offer several matches, the picker shows who supplied each one. Type to filter. **Tab** moves down and **Shift-Tab** moves up, wrapping at either end. **Enter** inserts the highlighted match into the editable line. **Escape** restores the original line.
 
-![The token picker shows DEPLOY_REGION from both shell and .env, with Enter to insert and Escape to cancel.](docs/picker.png)
+![The picker shows the same key from shell and .env, with Tab and Shift-Tab to move, Enter to insert and Escape to cancel.](docs/picker.png)
 
 Your command stays editable. The picker displays names and sources only. Your usual completion widget still handles filenames, unsupported quoting, command positions, and tokens with no match.
 
@@ -210,17 +210,28 @@ container refines the token for another Tab. Exact lookups preserve key case.
 Missing keys and unreadable files produce a diagnostic and an empty argument
 in the generated lookup. Present empty strings resolve quietly.
 
-## Complete tokens for a command option
+## Complete an argument with or without `$`
 
-A provider may select a different policy for a particular command or option.
-For example, shell-overrides can declare `~/.aws/credentials` as a
-`section-names` source for one command’s `--profile` option. With the INI
-provider enabled, this selection identifies INI even without an extension. At that option,
-completion shows only matching section names and the final lookup returns
-the name itself. Credential option names and values stay out of the picker.
-The optional plugin owns its manifest and checks whether the declaration is
-still active on replay. Token-completion owns the parsers, navigation,
-display and lookup. [Contextual provider interface](docs/providers.md#command-and-option-context)
+A provider can offer candidates for a particular command’s option or positional
+argument. For example, a shell-overrides manifest can use the INI section names
+in `~/.aws/credentials` for `aws --profile`. With markerless completion enabled
+for that option, these interactions have different effects:
+
+| Type, then press Tab | What choosing `work-read-dev` puts in the command |
+| --- | --- |
+| `aws --profile wo` or `aws --profile=wo` | The literal profile name, quoted as one argument. History keeps the selected name. |
+| `aws --profile $wo` or `aws --profile=$wo` | A guarded lookup that reads the credentials file’s section names when the command runs or replays. |
+| `aws --profile ` or `aws --profile=` | The manifest can offer all profile names here or delegate the empty value to native completion. |
+
+The picker displays document paths or names and their sources. Selecting a
+literal leaf puts its value into the editable line and shell history. For
+`section-names` the returned value is the section name itself. The INI entries
+inside each profile stay out of the candidates and the command.
+
+A provider can also match an argument by position, such as the first argument
+to `deploy`. Bare text at undeclared positions uses the previous Tab binding.
+[Manifest recipes](https://github.com/randallwick/shell-overrides#recipes) ·
+[Contextual provider interface](docs/providers.md#command-and-option-context)
 
 ## Write a provider
 

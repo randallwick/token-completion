@@ -98,13 +98,23 @@ _tc_manifest_format() {
   _tc_format=$_tc_result
 }
 
-# Document providers share file parsing, path traversal and deferred insertion.
-# A scoped provider may call this same API with an execution-time policy guard.
-token_completion_file() {
+# Deferred rows carry an expression; literal rows resolve only after selection.
+token_completion_file() { _tc_file_candidates deferred "$@"; }
+token_completion_file_literal() { _tc_file_candidates literal "$@"; }
+
+_tc_file_candidates() {
   emulate -L zsh
+  local _tc_mode=$1
+  shift
   (( $# == 4 || $# == 7 || $# == 8 )) || return 2
+  [[ $_tc_mode != literal ]] || (( ${+_tc_literal_fields} )) || return 1
   local _tc_fragment_text=$1 _tc_format=$2 _tc_selection=$3 _tc_file=$4
   shift 4
+  # A leading dash in a bare path would be parsed as an option on the next
+  # Tab. Keep its editable spelling distinct from the canonical document path.
+  if [[ $_tc_mode == literal && $_tc_fragment_text == %2[Dd]* ]]; then
+    _tc_fragment_text=-${_tc_fragment_text[4,-1]}
+  fi
   local _tc_kind _tc_display _tc_node _tc_insertion
   local -a _tc_lookup _tc_formats
   _tc_file_formats
@@ -120,14 +130,39 @@ token_completion_file() {
   fi
   while IFS= read -r -d '' _tc_kind && IFS= read -r -d '' _tc_display && IFS= read -r -d '' _tc_node; do
     if [[ $_tc_kind == branch ]]; then
-      _tc_insertion='$'${_tc_node}
+      _tc_insertion=$_tc_node
+      if [[ $_tc_mode == deferred ]]; then
+        _tc_insertion='$'${_tc_node}
+      elif [[ $_tc_node == -* ]]; then
+        _tc_insertion=%2D${_tc_node#-}
+      fi
     else
       _tc_lookup=("$_tc_format" "$_tc_selection" "$_tc_file" "$_tc_node" "$@")
+      if [[ $_tc_mode == literal ]]; then
+        token_completion_offer "$_tc_display" "$_tc_file" '' || continue
+        # Executable arguments are NUL-free. Keep exact argv out of fzf and the
+        # editable line, keyed by the opaque candidate ID until acceptance.
+        _tc_literal_fields[${#_tc_insertions}]=${(pj:\0:)_tc_lookup}
+        continue
+      fi
       # The sentinel preserves trailing newlines through command substitution.
       _tc_insertion='"${$(token-completion lookup '"${(j: :)${(@q)_tc_lookup}}"' && builtin print -rn -- .)%.}"'
     fi
     token_completion_offer "$_tc_display" "$_tc_file" "$_tc_insertion"
   done < <(command "$_tc_python" "$_tc_root/file_source.py" list "$_tc_format" "$_tc_selection" "$_tc_file" "$_tc_fragment_text")
+}
+
+_tc_accept_insertion() {
+  emulate -L zsh
+  if (( ! ${+_tc_literal_fields[$1]} )); then
+    _tc_insertion=${_tc_insertions[$1]}
+    return 0
+  fi
+  local -a _tc_lookup=("${(@0)_tc_literal_fields[$1]}")
+  local _tc_value
+  _tc_value=$(token-completion lookup "${_tc_lookup[@]}" && builtin print -rn -- .) || return $?
+  _tc_value=${_tc_value%.}
+  _tc_insertion=${(q)_tc_value}
 }
 
 _tc_document_query() {
@@ -306,6 +341,7 @@ _tc_forget_file() {
   unfunction "token_provider_${_tc_id}_query" 2>/dev/null
   unfunction "token_provider_${_tc_id}_prepare" 2>/dev/null
   unfunction "token_provider_${_tc_id}_context" 2>/dev/null
+  unfunction "token_provider_${_tc_id}_argument_context" 2>/dev/null
   unset "token_provider_${_tc_id}_version"
   unset "_tc_prepared[$_tc_id]" "_tc_file_ids[$1]" "_tc_file_paths[$1]" "_tc_file_sources[$1]"
 }
@@ -425,25 +461,28 @@ _tc_fragment() {
   emulate -L zsh
   setopt extendedglob
   local -a _tc_words
+  local _tc_input=$LBUFFER
+  local -i _tc_empty=0
+  if [[ $_tc_input == *[[:space:]] ]]; then
+    # A sentinel lets the lexer distinguish a new argument from escaped
+    # whitespace, an open quote, or the rest of an interactive comment.
+    _tc_input+=TC_EMPTY
+    _tc_empty=1
+  fi
   if [[ $1 == on ]]; then
-    _tc_words=(${(Z:c:)LBUFFER})
+    _tc_words=(${(Z:c:)_tc_input})
   else
-    _tc_words=(${(z)LBUFFER})
+    _tc_words=(${(z)_tc_input})
   fi
   # The lexer loses adjacency around a named descriptor ({fd}>file). Delegate
   # that grammar instead of treating the descriptor name as an argument.
   [[ $LBUFFER == *'{'[a-zA-Z_][a-zA-Z0-9_]#'}'[\<\>]* ]] && return 1
   local _tc_word=${_tc_words[-1]} _tc_previous
-  [[ $#_tc_words -ge 2 && $LBUFFER == *"$_tc_word" && $RBUFFER != [^[:space:]]* ]] || return 1
-  # The contextual hook owns dotted paths and empty option fragments. Plain
-  # identifier queries continue to use the existing provider API.
-  local _tc_raw=${_tc_word#*=}
-  if [[ $_tc_word == *=* ]]; then
-    _tc_option=${_tc_word%%=*}
-    [[ $_tc_option == -[A-Za-z0-9-][A-Za-z0-9_-]# ]] || return 1
-    _tc_form=equals
+  [[ $#_tc_words -ge 2 && $_tc_input == *"$_tc_word" && $RBUFFER != [^[:space:]]* ]] || return 1
+  if (( _tc_empty )); then
+    [[ $_tc_word == TC_EMPTY ]] || return 1
+    _tc_word=''
   fi
-  [[ $_tc_raw == '$'[A-Za-z0-9_.%-]# ]] || return 1
   local -i _tc_expect_command=1 _tc_redirect=0
   for _tc_previous in "${(@)_tc_words[1,-2]}"; do
     if (( _tc_redirect )); then
@@ -468,15 +507,32 @@ _tc_fragment() {
     fi
   done
   (( _tc_expect_command || _tc_redirect )) && return 1
-  if [[ -z $_tc_form && ${_tc_args[-1]} == -[A-Za-z0-9-][A-Za-z0-9_-]# ]]; then
-    _tc_option=${_tc_args[-1]}
-    _tc_form=separate
-    _tc_args[-1]=()
+  local _tc_raw=$_tc_word
+  _tc_form=positional
+  if (( ! ${_tc_args[(Ie)--]} )); then
+    if [[ $_tc_word == -*=* ]]; then
+      _tc_option=${_tc_word%%=*}
+      [[ $_tc_option == -[A-Za-z0-9-][A-Za-z0-9_-]# && $_tc_option != -- ]] || return 1
+      _tc_raw=${_tc_word#*=}
+      _tc_form=equals
+    elif [[ ${_tc_args[-1]} == -[A-Za-z0-9-][A-Za-z0-9_-]# ]]; then
+      _tc_option=${_tc_args[-1]}
+      _tc_form=separate
+      _tc_args[-1]=()
+    fi
+    # Option names belong to the shell's normal command completion.
+    [[ $_tc_form != positional || $_tc_raw != -* ]] || return 1
   fi
-  if (( ${_tc_args[(Ie)--]} )) || [[ $_tc_option == -- ]]; then
-    _tc_form=''
+  if [[ $_tc_raw == '$'* ]]; then
+    _tc_mode=token
+    _tc_query=${_tc_raw#\$}
+    [[ $_tc_query == [A-Za-z0-9_.%-]# ]] || return 1
+  else
+    _tc_mode=literal
+    _tc_query=$_tc_raw
+    [[ $_tc_query == [[:alnum:]@_.,:/%+=-]# ]] || return 1
   fi
-  _tc_query=${_tc_raw#\$}
+  _tc_suffix_length=${#_tc_raw}
 }
 
 _tc_pick() {
@@ -505,7 +561,8 @@ _tc_pick() {
   printf '%s\0' "${_tc_lines[@]}" | FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' command "$_tc_fzf" \
     --read0 --print0 --delimiter=$'\t' --with-nth=2.. --no-multi --layout=reverse --no-border \
     --prompt="${TOKEN_COMPLETION_PROMPT-$_tc_default_prompt}" --pointer='▸' \
-    --header='Enter  insert     Esc  cancel' "${_tc_style[@]}"
+    --bind=tab:down,btab:up --cycle \
+    --header='Tab/Shift-Tab  move     Enter  insert     Esc  cancel' "${_tc_style[@]}"
 }
 
 # A contextual provider already matched each component. Keep its display row
@@ -528,18 +585,33 @@ _tc_complete() {
   setopt extendedglob
   local -a _tc_parameter_names=("${(@k)parameters}")
   local _tc_query _tc_id _tc_row _tc_filter_result
-  local -i _tc_scoped=0
+  local -i _tc_scoped=0 _tc_any_scoped=0 _tc_before _tc_suffix_length
+  local -A _tc_literal_fields
+  local _tc_mode _tc_insertion
   local _tc_command _tc_option _tc_form _tc_hook
   local -a _tc_ids _tc_rows _tc_matches _tc_insertions _tc_context_rows _tc_args
   if _tc_fragment "$2"; then
     _tc_active_providers
     for _tc_id in "${_tc_ids[@]}"; do
-      _tc_hook=token_provider_${_tc_id}_context
-      if [[ -n $_tc_form ]] && (( ${+functions[$_tc_hook]} )); then
-        "$_tc_hook" "$_tc_query" "$_tc_command" "$_tc_option" "$_tc_form" "${_tc_args[@]}" >/dev/null
+      _tc_scoped=0
+      _tc_hook=token_provider_${_tc_id}_argument_context
+      if (( ${+functions[$_tc_hook]} )); then
+        _tc_before=$#_tc_context_rows
+        "$_tc_hook" "$_tc_mode" "$_tc_query" "$_tc_command" "$_tc_option" "$_tc_form" "${_tc_args[@]}" >/dev/null
+        # The word preceding this argument could be a standalone flag. Let
+        # the provider interpret it as argv if it did not claim an option.
+        if [[ $_tc_form == separate && ( $_tc_mode == token || $_tc_query != -* ) ]] && (( ! _tc_scoped && $#_tc_context_rows == _tc_before )); then
+          "$_tc_hook" "$_tc_mode" "$_tc_query" "$_tc_command" '' positional "${_tc_args[@]}" "$_tc_option" >/dev/null
+        fi
+      elif [[ $_tc_mode == token && $_tc_form != positional ]]; then
+        _tc_hook=token_provider_${_tc_id}_context
+        if (( ${+functions[$_tc_hook]} )); then
+          "$_tc_hook" "$_tc_query" "$_tc_command" "$_tc_option" "$_tc_form" "${_tc_args[@]}" >/dev/null
+        fi
       fi
+      (( _tc_scoped )) && _tc_any_scoped=1
     done
-    if (( ! _tc_scoped )); then
+    if [[ $_tc_mode == token ]] && (( ! _tc_any_scoped )); then
       for _tc_id in "${_tc_ids[@]}"; do
         # File providers accept an empty root or a dotted document path.
         # Third-party v1 query functions keep their flat identifier contract.
@@ -563,7 +635,8 @@ _tc_complete() {
   esac
   _tc_id=${_tc_row%%$'\t'*}
   [[ $_tc_id == <1-> && $_tc_id -le $#_tc_insertions ]] || return 1
-  LBUFFER="${LBUFFER%\$"$_tc_query"}${_tc_insertions[_tc_id]}"
+  _tc_accept_insertion "$_tc_id" || { zle -R; return; }
+  LBUFFER="${LBUFFER[1,${#LBUFFER}-_tc_suffix_length]}$_tc_insertion"
   zle -R
 }
 

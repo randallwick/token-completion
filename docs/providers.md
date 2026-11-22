@@ -111,9 +111,30 @@ insertions let providers display a key while inserting a lookup expression.
 
 ## Command and option context
 
-In addition to the version-1 query function, a provider can define
+Implement `token_provider_ID_argument_context MODE FRAGMENT COMMAND OPTION FORM [ARG ...]`
+to offer candidates at specific arguments. The widget supplies `literal` for
+unmarked text and `token` for a fragment beginning with `$`. The fragment
+excludes the marker. An empty fragment is meaningful in either mode.
+
+| Form | Option and preceding arguments |
+| --- | --- |
+| `equals` | `--profile=wo` supplies `--profile` and the argv before that option. |
+| `separate` | `--profile wo` supplies `--profile` and the argv before that option. The provider decides whether the preceding word takes a value. |
+| `positional` | The option is empty. Preceding arguments count from the command, excluding redirections. The first argument has no preceding arguments. |
+
+The provider decides whether it owns this position and what to do with an empty
+fragment. For a match, call `token_completion_scope` and then offer candidates.
+For an undeclared position, return without claiming it. If a declared option
+requests native completion, claim it and offer zero rows. An unclaimed
+`separate` form can be offered to the same provider again as `positional`,
+with the flag added back to the preceding argv. This lets a provider distinguish
+a flag that consumes a value from a standalone switch. Unmarked text never triggers a global token search. The
+widget saves the original argument span so insertion preserves an adjacent
+`--option=` and text after the cursor.
+
+Providers using the earlier option-only interface can keep
 `token_provider_<id>_context FRAGMENT COMMAND OPTION FORM [ARG ...]`.
-The widget calls the hook for enabled providers at `--option=$fragment` and
+The widget uses it when the provider has no argument-context hook, at `--option=$fragment` and
 `--option $fragment` positions (also short options). `FORM` is `equals` or
 `separate`. The fragment excludes the dollar sign and can be empty. Additional
 arguments are the preceding words of the active command with shell quoting
@@ -131,8 +152,19 @@ the hook without claiming scope leaves ordinary providers available.
 
 ### Delegate to a document provider
 
-A contextual hook can use the same document reader as the standalone INI,
-TOML, JSON and YAML providers. Call:
+Choose the helper that matches the requested insertion. Both take the same
+arguments and show the same names and provenance in the picker.
+
+| Helper | What happens on selection |
+| --- | --- |
+| `token_completion_file_literal` | Resolve the chosen leaf, run its guard if present, and quote the result as a single shell word. History stores the literal. |
+| `token_completion_file` | Insert a guarded lookup expression. History replay resolves the current value. |
+
+Both helpers allow another Tab to descend from a selected container. The
+literal helper inserts a bare path prefix and the deferred helper keeps its
+`$` marker. Canceling the picker performs no value lookup.
+
+For example, a deferred source uses the following signature.
 
 ```zsh
 token_completion_file "$fragment" "$format" "$select" "$file" [GUARD CMD OPTION [DECLARED_FORMAT]]
